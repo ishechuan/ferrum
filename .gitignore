@@ -1,0 +1,38 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Editor
+*.iml
+
+# Ferrum specific
+.ferrum/
+deno/
+
+# Test output
+*.log
+
+# Build artifacts
+/dist
+/build
+
+# Node modules (if any)
+node_modules/
+
+# Environment
+.env
+.env.local
+
+# Temporary files
+*.tmp
+*.temp
