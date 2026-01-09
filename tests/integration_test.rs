@@ -358,3 +358,233 @@ fn test_repl_config() {
     assert_eq!(config.continuation_prompt, "... ");
     assert!(config.show_result);
 }
+
+/// Test simple ES module execution (.mjs file)
+#[test]
+fn test_simple_module_execution() {
+    init_v8_for_tests();
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("test.mjs");
+
+    // Write a simple module
+    std::fs::write(
+        &file_path,
+        "const x = 10;\nconst y = 20;\nx + y;",
+    )
+    .unwrap();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+    let mut runtime = ferrum::JsRuntime::new(config, permissions).unwrap();
+
+    // Set up module loader
+    runtime.setup_module_loader(ModuleLoaderConfig::default());
+
+    let result = runtime.execute_module(file_path.to_str().unwrap());
+
+    assert!(result.is_ok());
+    // ES modules return a Promise object
+    assert_eq!(result.unwrap(), "[object Promise]");
+}
+
+/// Test module execution with Deno API calls
+#[test]
+fn test_module_with_deno_api() {
+    init_v8_for_tests();
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("deno-test.mjs");
+
+    // Write a module that uses Deno API
+    std::fs::write(
+        &file_path,
+        r#"
+        const content = "Hello from module!";
+        const testPath = "/tmp/ferrum-module-test.txt";
+
+        // Use Deno API to write file
+        await Deno.writeTextFile(testPath, content);
+
+        // Use Deno API to read back
+        const readContent = await Deno.readTextFile(testPath);
+
+        // Use Deno API to remove file
+        await Deno.remove(testPath);
+
+        // Check content matches
+        content === readContent ? "success" : "failed";
+        "#,
+    )
+    .unwrap();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+    let mut runtime = ferrum::JsRuntime::new(config, permissions).unwrap();
+
+    // Set up module loader
+    runtime.setup_module_loader(ModuleLoaderConfig::default());
+
+    let result = runtime.execute_module(file_path.to_str().unwrap());
+
+    assert!(result.is_ok());
+    // ES modules return a Promise object
+    assert_eq!(result.unwrap(), "[object Promise]");
+}
+
+/// Test module loader setup
+#[test]
+fn test_module_loader_setup() {
+    init_v8_for_tests();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+    let mut runtime = ferrum::JsRuntime::new(config, permissions).unwrap();
+
+    // Initially, module loader should not be available
+    assert!(!runtime.has_module_loader());
+
+    // Set up module loader
+    runtime.setup_module_loader(ModuleLoaderConfig::default());
+
+    // Now module loader should be available
+    assert!(runtime.has_module_loader());
+}
+
+/// Test module with import map
+#[test]
+fn test_module_with_import_map() {
+    init_v8_for_tests();
+
+    let temp_dir = TempDir::new().unwrap();
+    let import_map_path = temp_dir.path().join("import-map.json");
+    let file_path = temp_dir.path().join("test.mjs");
+
+    // Write import map
+    std::fs::write(
+        &import_map_path,
+        r#"{
+            "imports": {
+                "lodash/": "https://cdn.example.com/lodash/"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    // Write a simple module (we won't actually import anything for this test)
+    std::fs::write(
+        &file_path,
+        "const x = 42;\nx;",
+    )
+    .unwrap();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+    let mut runtime = ferrum::JsRuntime::new(config, permissions).unwrap();
+
+    // Load import map
+    let import_map_json = std::fs::read_to_string(&import_map_path).unwrap();
+    let base_dir = temp_dir.path().to_string_lossy().to_string();
+    let import_map = ferrum::ImportMap::from_json(&import_map_json, base_dir).unwrap();
+
+    // Set up module loader with import map
+    let mut module_config = ModuleLoaderConfig::default();
+    module_config.import_map = Some(import_map);
+    runtime.setup_module_loader(module_config);
+
+    // Execute module
+    let result = runtime.execute_module(file_path.to_str().unwrap());
+
+    assert!(result.is_ok());
+    // ES modules return a Promise object
+    assert_eq!(result.unwrap(), "[object Promise]");
+}
+
+/// Test module with console output
+#[test]
+fn test_module_with_console() {
+    init_v8_for_tests();
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("console.mjs");
+
+    // Write a module that uses console
+    std::fs::write(
+        &file_path,
+        r#"
+        console.log("Module executed");
+        console.warn("Warning message");
+        console.error("Error message");
+        const result = "done";
+        result;
+        "#,
+    )
+    .unwrap();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+    let mut runtime = ferrum::JsRuntime::new(config, permissions).unwrap();
+
+    // Set up module loader
+    runtime.setup_module_loader(ModuleLoaderConfig::default());
+
+    let result = runtime.execute_module(file_path.to_str().unwrap());
+
+    assert!(result.is_ok());
+    // ES modules return a Promise object
+    assert_eq!(result.unwrap(), "[object Promise]");
+}
+
+/// Test runtime with module loader
+#[test]
+fn test_runtime_with_module_loader() {
+    init_v8_for_tests();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+
+    // Create runtime with module loader using the with_module_loader method
+    let module_config = ModuleLoaderConfig::default();
+    let runtime = ferrum::JsRuntime::with_module_loader(config, permissions, module_config);
+
+    assert!(runtime.is_ok());
+    let runtime = runtime.unwrap();
+    assert!(runtime.has_module_loader());
+}
+
+/// Test module error handling
+#[test]
+fn test_module_error_handling() {
+    init_v8_for_tests();
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("error.mjs");
+
+    // Write a module with syntax error
+    std::fs::write(
+        &file_path,
+        "const x = ; // syntax error",
+    )
+    .unwrap();
+
+    let config = RuntimeConfig::default();
+    let permissions = Permissions::allow_all();
+    let mut runtime = ferrum::JsRuntime::new(config, permissions).unwrap();
+
+    // Set up module loader
+    runtime.setup_module_loader(ModuleLoaderConfig::default());
+
+    let result = runtime.execute_module(file_path.to_str().unwrap());
+
+    // Should fail with compilation error
+    assert!(result.is_err());
+    match result {
+        Err(ferrum::RuntimeError::CompilationError(_)) => {
+            // Expected error type
+        }
+        _ => {
+            panic!("Expected CompilationError");
+        }
+    }
+}
+

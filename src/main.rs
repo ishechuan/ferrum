@@ -165,15 +165,59 @@ fn run_script(script: &str, command: &Commands) -> Result<(), FerrumError> {
     let mut runtime = ferrum::JsRuntime::new(config, permissions)
         .map_err(|e| FerrumError::Runtime(e.to_string()))?;
 
-    // Execute the script
-    match runtime.execute_file(script) {
-        Ok(_) => {
-            info!("Script executed successfully");
-            Ok(())
+    // Check if we should use module loading
+    // Use module loading for .mjs files or when import map is specified
+    let use_module_loading = script.ends_with(".mjs")
+        || command.import_map().is_some();
+
+    if use_module_loading {
+        // Set up module loader with import map if provided
+        let mut module_config = ferrum::ModuleLoaderConfig::default();
+
+        // Load import map if provided
+        if let Some(import_map_path) = command.import_map() {
+            info!("Loading import map from: {:?}", import_map_path);
+
+            // Read the import map file
+            let import_map_json = std::fs::read_to_string(import_map_path)
+                .map_err(|e| FerrumError::Runtime(format!("Failed to read import map: {}", e)))?;
+
+            // Parse the import map
+            let base_dir = std::env::current_dir()
+                .map_err(|e| FerrumError::Runtime(format!("Failed to get current directory: {}", e)))?;
+
+            let import_map = ferrum::ImportMap::from_json(
+                &import_map_json,
+                base_dir.to_string_lossy().to_string(),
+            ).map_err(|e| FerrumError::Module(e.to_string()))?;
+
+            module_config.import_map = Some(import_map);
         }
-        Err(e) => {
-            error!("Script execution failed: {}", e);
-            Err(FerrumError::Runtime(e.to_string()))
+
+        runtime.setup_module_loader(module_config);
+
+        // Execute as module
+        match runtime.execute_module(script) {
+            Ok(_) => {
+                info!("Module executed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                error!("Module execution failed: {}", e);
+                Err(FerrumError::Runtime(e.to_string()))
+            }
+        }
+    } else {
+        // Execute as regular script
+        match runtime.execute_file(script) {
+            Ok(_) => {
+                info!("Script executed successfully");
+                Ok(())
+            }
+            Err(e) => {
+                error!("Script execution failed: {}", e);
+                Err(FerrumError::Runtime(e.to_string()))
+            }
         }
     }
 }

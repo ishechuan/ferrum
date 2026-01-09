@@ -44,6 +44,9 @@ once_cell = "1.19"
 uuid = { version = "1.6", features = ["v4"] }
 regex = "1.10"
 
+# File system watching
+notify = "6.1"
+
 [dev-dependencies]
 # Testing
 tokio-test = "0.4"

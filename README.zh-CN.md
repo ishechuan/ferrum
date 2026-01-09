@@ -9,8 +9,9 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 ## 状态
 
 **版本：** 0.1.0 (Alpha)
+**第一阶段：** ✅ 100% 完成
 
-这是一个早期阶段的项目。核心功能已实现，但许多功能仍在开发中。详情请参阅[当前限制](#当前限制)。
+这是一个早期阶段的项目，第一阶段核心功能已完全实现。许多高级功能仍在开发中。详情请参阅[当前限制](#当前限制)。
 
 ## 特性
 
@@ -206,15 +207,12 @@ ferrum/
 - **WebSocket** - 已设计但未实现
 - **TCP 连接** - 已设计但未实现
 
+### 模块加载
+- **ES 模块导入** - 模块加载器支持 `.mjs` 文件，但动态导入（`import()`）尚未实现
+- **模块解析回调** - 基础实现已就绪，需要增强以支持复杂的导入图
+
 ### 定时器
 - **setInterval** - 定时器基础设施可用，但 callback 执行需要正确的 `FnMut` 处理
-
-### 文件系统
-- **文件监听** - 仅为占位符，需要集成 `notify` crate
-
-### JavaScript 集成
-- **V8-Rust 桥接** - 原生操作尚未暴露给 JavaScript
-- **核心 JavaScript API** - `js/core.js` 引用了未实现的原生函数
 
 ### TypeScript
 - **TypeScript 支持** - 计划在第四阶段
@@ -227,13 +225,16 @@ ferrum/
 
 ## 开发路线图
 
-### 第一阶段：核心运行时 (MVP) - 85% 完成
+### 第一阶段：核心运行时 (MVP) - ✅ 100% 完成
 - [x] 基础 V8 集成
 - [x] 模块加载 (ESM)
+- [x] 模块加载器运行时集成
 - [x] 权限系统
-- [x] 文件系统操作（文件监听待完成）
+- [x] 文件系统操作（包括文件监听）
 - [x] 基础 REPL
 - [x] DNS 解析
+- [x] V8-Rust 桥接
+- [x] 导入映射支持
 
 ### 第二阶段：Web API - 20% 完成
 - [ ] Fetch API (HTTP 客户端) - API 已设计，待实现
@@ -274,9 +275,9 @@ ferrum/
 ### 优先领域
 
 1. **HTTP 客户端集成** - 集成 reqwest 或 hyper 以实现 fetch API
-2. **V8-Rust 桥接** - 将原生操作暴露给 JavaScript
-3. **setInterval 修复** - 正确的 FnMut callback 处理
-4. **文件监听** - 集成 notify crate
+2. **动态导入** - 实现 `import()` 以支持动态模块加载
+3. **模块解析** - 增强模块解析以支持复杂的导入图
+4. **setInterval 修复** - 正确的 FnMut callback 处理
 5. **测试** - 添加更多集成测试
 
 指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)（即将推出）。

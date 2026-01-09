@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::permissions::{Permissions, PermissionError};
@@ -397,30 +397,240 @@ impl FileWriter {
     }
 }
 
+/// Event types for file watching
+///
+/// Represents the different types of file system events that can be detected.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FileWatcherEvent {
+    /// A file or directory was created
+    Create(PathBuf),
+    /// A file or directory was modified
+    Modify(PathBuf),
+    /// A file or directory was removed
+    Remove(PathBuf),
+    /// A file or directory was renamed (old path, new path)
+    Rename(PathBuf, PathBuf),
+}
+
+/// Configuration for file watcher
+///
+/// Controls the behavior of file watching operations.
+#[derive(Debug, Clone, Copy)]
+pub struct FileWatcherConfig {
+    /// Whether to watch directories recursively
+    pub recursive: bool,
+    /// Optional debounce time in milliseconds to reduce duplicate events
+    pub debounce_ms: Option<u64>,
+}
+
+impl Default for FileWatcherConfig {
+    fn default() -> Self {
+        Self {
+            recursive: true,
+            debounce_ms: None,
+        }
+    }
+}
+
 /// Watch a file or directory for changes
+///
+/// Uses the `notify` crate to monitor file system events. The watcher will
+/// call the provided callback function for each detected event.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file or directory to watch
+/// * `permissions` - Permission object to verify read access
+/// * `callback` - Function to call for each file system event
+/// * `config` - Configuration options for the watcher
+///
+/// # Returns
+///
+/// Returns a `FileWatcher` that will stop watching when dropped.
+///
+/// # Errors
+///
+/// Returns `FsError` if:
+/// - Permission is denied for the path
+/// - The path does not exist
+/// - The watcher cannot be created
+///
+/// # Example
+///
+/// ```no_run
+/// use ferrum::ops::fs::{FileWatcher, FileWatcherConfig};
+/// use ferrum::permissions::Permissions;
+///
+/// let watcher = FileWatcher::watch(
+///     "/path/to/watch",
+///     &Permissions::allow_all(),
+///     |event| println!("Event: {:?}", event),
+///     FileWatcherConfig::default(),
+/// ).unwrap();
+/// // Watcher runs until dropped
+/// ```
 pub struct FileWatcher {
-    _handle: tokio::task::JoinHandle<()>,
+    _watcher: notify::RecommendedWatcher,
+    // Use Option to allow taking ownership in Drop
+    _abort_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl FileWatcher {
     /// Start watching a path for changes
-    #[allow(unused_variables)]
+    ///
+    /// Creates a new file system watcher that monitors the specified path
+    /// for events (create, modify, remove, rename).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file or directory to watch
+    /// * `permissions` - Permission object to verify read access
+    /// * `callback` - Function to call for each file system event
+    /// * `config` - Configuration options for the watcher
+    ///
+    /// # Returns
+    ///
+    /// Returns a `FileWatcher` that will stop watching when dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FsError` if:
+    /// - Permission is denied for the path
+    /// - The path does not exist
+    /// - The watcher cannot be created
+    #[allow(clippy::type_complexity)]
     pub fn watch(
         path: &str,
         permissions: &Permissions,
-        callback: fn(String),
+        callback: impl Fn(FileWatcherEvent) + Send + 'static,
+        config: FileWatcherConfig,
     ) -> FsResult<Self> {
+        use notify::Watcher; // Required for watch() method
+
         permissions.check_read(path)?;
 
-        // TODO: Implement actual file watching using notify crate
-        // For now, return a dummy watcher
-        let handle = tokio::spawn(async move {
-            // Placeholder for file watching logic
+        // Verify the path exists before watching
+        let watch_path = PathBuf::from(path);
+        if !watch_path.exists() {
+            return Err(FsError::NotFound(path.to_string()));
+        }
+
+        // Create channel for notify events
+        let (watcher_tx, mut watcher_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Create the notify watcher
+        let mut watcher = notify::recommended_watcher(move |res| {
+            if let Ok(event) = res {
+                let _ = watcher_tx.send(event);
+            }
+        })
+        .map_err(|e| FsError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+        // Configure recursive mode based on config
+        let recursive_mode = if config.recursive {
+            notify::RecursiveMode::Recursive
+        } else {
+            notify::RecursiveMode::NonRecursive
+        };
+
+        // Start watching the path
+        watcher
+            .watch(&watch_path, recursive_mode)
+            .map_err(|e| FsError::Io(io::Error::new(io::ErrorKind::Other, e)))?;
+
+        // Spawn task to process events
+        let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            let mut last_event_time: Option<std::time::Instant> = None;
+            let mut pending_event: Option<FileWatcherEvent> = None;
+
+            loop {
+                tokio::select! {
+                    // Received a file system event
+                    Some(event) = watcher_rx.recv() => {
+                        let our_event = convert_notify_event(event);
+
+                        // Apply debouncing if configured
+                        if let Some(debounce_ms) = config.debounce_ms {
+                            let now = std::time::Instant::now();
+
+                            if let Some(last_time) = last_event_time {
+                                if now.duration_since(last_time).as_millis() < debounce_ms as u128 {
+                                    // Store as pending and continue waiting
+                                    pending_event = Some(our_event);
+                                    continue;
+                                }
+                            }
+
+                            // Check if we have a pending event to emit
+                            if let Some(pending) = pending_event.take() {
+                                callback(pending);
+                            }
+
+                            last_event_time = Some(now);
+                        }
+
+                        // No debouncing or debounce period passed
+                        callback(our_event);
+                    }
+                    // Abort signal received
+                    _ = &mut abort_rx => {
+                        // Shutdown requested
+                        break;
+                    }
+                }
+            }
         });
 
         Ok(Self {
-            _handle: handle,
+            _watcher: watcher,
+            _abort_tx: Some(abort_tx),
         })
+    }
+}
+
+impl Drop for FileWatcher {
+    fn drop(&mut self) {
+        // Send shutdown signal to the watcher task
+        // Take ownership of the sender from the Option
+        if let Some(abort_tx) = self._abort_tx.take() {
+            // Try to send the shutdown signal
+            // If the receiver has already been dropped, this will fail silently
+            let _ = abort_tx.send(());
+        }
+    }
+}
+
+/// Convert a notify Event to our FileWatcherEvent type
+fn convert_notify_event(event: notify::Event) -> FileWatcherEvent {
+    use notify::EventKind;
+
+    match event.kind {
+        EventKind::Create(_) => {
+            FileWatcherEvent::Create(event.paths.get(0).cloned().unwrap_or_default())
+        }
+        EventKind::Modify(_) => {
+            FileWatcherEvent::Modify(event.paths.get(0).cloned().unwrap_or_default())
+        }
+        EventKind::Remove(_) => {
+            FileWatcherEvent::Remove(event.paths.get(0).cloned().unwrap_or_default())
+        }
+        // For rename events, notify provides both old and new paths
+        EventKind::Any | EventKind::Other => {
+            if event.paths.len() >= 2 {
+                FileWatcherEvent::Rename(
+                    event.paths[0].clone(),
+                    event.paths[1].clone(),
+                )
+            } else {
+                FileWatcherEvent::Modify(event.paths.get(0).cloned().unwrap_or_default())
+            }
+        }
+        // Access events - treat as modify
+        EventKind::Access(_) => {
+            FileWatcherEvent::Modify(event.paths.get(0).cloned().unwrap_or_default())
+        }
     }
 }
 
@@ -643,5 +853,199 @@ mod tests {
 
         let resolved = realpath(path_str, &test_perms()).unwrap();
         assert!(resolved.ends_with("test.txt"));
+    }
+
+    // File watcher tests
+    #[tokio::test]
+    async fn test_file_watcher_create() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        let dir_str = temp_dir.path().to_str().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let tx_clone = tx.clone();
+        let _watcher = FileWatcher::watch(
+            dir_str,
+            &test_perms(),
+            move |event| {
+                let _ = tx_clone.send(event);
+            },
+            FileWatcherConfig::default(),
+        ).unwrap();
+
+        // Give the watcher a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Trigger event
+        fs::write(&file_path, "test content").unwrap();
+
+        // Wait for event
+        let event = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            rx.recv(),
+        ).await;
+
+        assert!(event.is_ok());
+        let received = event.unwrap();
+        assert!(received.is_some());
+        assert!(matches!(received, Some(FileWatcherEvent::Create(_))));
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_modify() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("modify.txt");
+        let dir_str = temp_dir.path().to_str().unwrap();
+
+        // Create the file first
+        fs::write(&file_path, "initial").unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let tx_clone = tx.clone();
+        let _watcher = FileWatcher::watch(
+            dir_str,
+            &test_perms(),
+            move |event| {
+                let _ = tx_clone.send(event);
+            },
+            FileWatcherConfig::default(),
+        ).unwrap();
+
+        // Give the watcher a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Modify the file
+        fs::write(&file_path, "modified content").unwrap();
+
+        // Wait for event (skip any initial create events)
+        let event = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            async {
+                loop {
+                    if let Some(e) = rx.recv().await {
+                        if matches!(e, FileWatcherEvent::Modify(_)) {
+                            return e;
+                        }
+                    }
+                }
+            },
+        ).await;
+
+        assert!(event.is_ok());
+        assert!(matches!(event.unwrap(), FileWatcherEvent::Modify(_)));
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_remove() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("remove.txt");
+        let dir_str = temp_dir.path().to_str().unwrap();
+
+        // Create the file first
+        fs::write(&file_path, "to be removed").unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let tx_clone = tx.clone();
+        let _watcher = FileWatcher::watch(
+            dir_str,
+            &test_perms(),
+            move |event| {
+                let _ = tx_clone.send(event);
+            },
+            FileWatcherConfig::default(),
+        ).unwrap();
+
+        // Give the watcher a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Remove the file
+        fs::remove_file(&file_path).unwrap();
+
+        // Wait for remove event
+        let event = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            async {
+                loop {
+                    if let Some(e) = rx.recv().await {
+                        if matches!(e, FileWatcherEvent::Remove(_)) {
+                            return e;
+                        }
+                    }
+                }
+            },
+        ).await;
+
+        assert!(event.is_ok());
+        assert!(matches!(event.unwrap(), FileWatcherEvent::Remove(_)));
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_permission_denied() {
+        let no_perms = Permissions::default();
+
+        let result = FileWatcher::watch(
+            "/some/path",
+            &no_perms,
+            |_event| {},
+            FileWatcherConfig::default(),
+        );
+
+        assert!(matches!(result, Err(FsError::Permission(_))));
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_nonexistent_path() {
+        let result = FileWatcher::watch(
+            "/nonexistent/path/xyz123",
+            &test_perms(),
+            |_event| {},
+            FileWatcherConfig::default(),
+        );
+
+        assert!(matches!(result, Err(FsError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_file_watcher_debounce() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("debounce.txt");
+        let dir_str = temp_dir.path().to_str().unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let event_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let event_count_clone = event_count.clone();
+
+        let _watcher = FileWatcher::watch(
+            dir_str,
+            &test_perms(),
+            move |event| {
+                event_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = tx.send(event);
+            },
+            FileWatcherConfig {
+                recursive: true,
+                debounce_ms: Some(200), // 200ms debounce
+            },
+        ).unwrap();
+
+        // Give the watcher a moment to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Trigger multiple rapid events
+        for i in 0..5 {
+            fs::write(&file_path, format!("content {}", i)).unwrap();
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        // Wait for debounce period and a bit more
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // With debouncing, we should receive fewer events than writes
+        // (exact count depends on timing, but should be less than 5)
+        let count = event_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(count < 5, "Expected fewer events with debouncing, got {}", count);
     }
 }

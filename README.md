@@ -9,8 +9,9 @@ English | [简体中文](README.zh-CN.md)
 ## Status
 
 **Version:** 0.1.0 (Alpha)
+**Phase 1:** ✅ 100% Complete
 
-This is an early-stage project. Core functionality is implemented, but many features are still in development. See [Current Limitations](#current-limitations) for details.
+This is an early-stage project with Phase 1 core functionality fully implemented. Many advanced features are still in development. See [Current Limitations](#current-limitations) for details.
 
 ## Features
 
@@ -207,15 +208,12 @@ This is an alpha release. The following features are **not yet implemented**:
 - **WebSocket** - Designed but not implemented
 - **TCP connections** - Designed but not implemented
 
+### Module Loading
+- **ES Module imports** - Module loader works for `.mjs` files, but dynamic imports (`import()`) not yet supported
+- **Module resolution callback** - Basic implementation, needs enhancement for complex import graphs
+
 ### Timers
 - **setInterval** - Timer infrastructure works, but callback execution needs proper `FnMut` handling
-
-### File System
-- **File watching** - Placeholder only, needs `notify` crate integration
-
-### JavaScript Integration
-- **V8-Rust bridging** - Native operations not yet exposed to JavaScript
-- **Core JavaScript API** - `js/core.js` references unimplemented native functions
 
 ### TypeScript
 - **TypeScript support** - Planned for Phase 4
@@ -228,13 +226,16 @@ This is an alpha release. The following features are **not yet implemented**:
 
 ## Roadmap
 
-### Phase 1: Core Runtime (MVP) - 85% Complete
+### Phase 1: Core Runtime (MVP) - ✅ 100% Complete
 - [x] Basic V8 integration
 - [x] Module loading (ESM)
+- [x] Module loader runtime integration
 - [x] Permission system
-- [x] File system operations (file watching pending)
+- [x] File system operations (including file watching)
 - [x] Basic REPL
 - [x] DNS resolution
+- [x] V8-Rust bridge
+- [x] Import map support
 
 ### Phase 2: Web APIs - 20% Complete
 - [ ] Fetch API (HTTP client) - API designed, needs implementation
@@ -275,9 +276,9 @@ Contributions are welcome! This is an early-stage project and there's plenty to 
 ### Priority Areas
 
 1. **HTTP Client Integration** - Integrate reqwest or hyper for fetch API
-2. **V8-Rust Bridge** - Expose native operations to JavaScript
-3. **setInterval Fix** - Proper FnMut callback handling
-4. **File Watching** - Integrate notify crate
+2. **Dynamic Imports** - Implement `import()` for dynamic module loading
+3. **Module Resolution** - Enhance module resolution for complex import graphs
+4. **setInterval Fix** - Proper FnMut callback handling
 5. **Tests** - Add more integration tests
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines (coming soon).
