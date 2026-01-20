@@ -1627,6 +1627,13 @@ pub fn bootstrap_globals(
     }
 
     tracing::debug!("Registered Deno object");
+
+    // Bootstrap TextEncoder and TextDecoder
+    use crate::ops::text_encoding_bindings::bootstrap_text_encoding_globals;
+    bootstrap_text_encoding_globals(scope);
+
+    tracing::debug!("Registered TextEncoder/TextDecoder");
+
     tracing::info!("Global JavaScript APIs bootstrapped successfully");
 
     Ok(())

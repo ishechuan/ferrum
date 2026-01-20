@@ -894,6 +894,10 @@ pub fn bootstrap_async_globals(
         global.set(scope2, key.into(), deno.into());
     }
 
+    // Bootstrap TextEncoder and TextDecoder
+    use crate::ops::text_encoding_bindings::bootstrap_text_encoding_globals;
+    bootstrap_text_encoding_globals(scope);
+
     tracing::debug!("Registered async Deno object");
     tracing::info!("Async global JavaScript APIs bootstrapped successfully");
 

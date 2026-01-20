@@ -8,6 +8,8 @@ pub mod bindings;
 pub mod dispatch;
 pub mod fs;
 pub mod net;
+pub mod text_encoding;
+pub mod text_encoding_bindings;
 pub mod timer_bindings;
 pub mod timers;
 
@@ -17,6 +19,7 @@ pub use bindings::*;
 pub use dispatch::*;
 pub use fs::*;
 pub use net::*;
+pub use text_encoding::*;
 pub use timers::*;
 
 // Selectively re-export async_bindings

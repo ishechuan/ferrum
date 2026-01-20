@@ -10,7 +10,7 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 **版本：** 0.2.0 (Alpha)
 **第一阶段：** ✅ 100% 完成
-**第二阶段：** 90% 完成（HTTP 服务器已实现！）
+**第二阶段：** 95% 完成（TextEncoder/TextDecoder 已实现！）
 
 这是一个早期阶段的项目，第一阶段核心功能已完全实现。第二阶段（Web API）现已实现 HTTP 服务器支持，完成度达到 90%。
 
@@ -24,9 +24,10 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 ### 标准库
 - **文件系统 API**：读取、写入、复制、重命名、目录操作（全部支持异步！）
-- **网络操作**：DNS 解析、HTTP fetch（GET、POST、headers、timeout）、HTTP 服务器 (Deno.serve)
+- **网络操作**：DNS 解析、HTTP fetch（GET、POST、headers, timeout）、HTTP 服务器 (Deno.serve)
 - **定时器 API**：setTimeout、setInterval、Deno.sleep、Promise 支持
 - **路径工具**：跨平台路径操作
+- **文本编码**：TextEncoder、TextDecoder（UTF-8）
 
 ### 开发体验
 - **REPL**：支持多行输入的交互式 Shell
@@ -149,6 +150,30 @@ console.log("服务器启动在", await server.addr());
 运行：
 ```bash
 ferrum run --allow-net server.js
+```
+
+### 文本编码
+```javascript
+// encoding.js
+// TextEncoder 将字符串编码为 UTF-8 字节
+const encoder = new TextEncoder();
+const bytes = encoder.encode("Hello, 世界! 🎉");
+console.log("编码后的字节:", bytes);
+
+// TextDecoder 将 UTF-8 字节解码为字符串
+const decoder = new TextDecoder();
+const decoded = decoder.decode(bytes);
+console.log("解码后的字符串:", decoded);
+
+// encodeInto 用于高效编码到预分配的缓冲区
+const dest = new Uint8Array(10);
+const result = encoder.encodeInto("Hello", dest);
+console.log(`读取: ${result.read}, 写入: ${result.written}`);
+```
+
+运行：
+```bash
+ferrum run encoding.js
 ```
 
 ## 权限系统
@@ -275,15 +300,15 @@ ferrum/
 - [x] V8-Rust 桥接
 - [x] 导入映射支持
 
-### 第二阶段：Web API - 90% 完成
+### 第二阶段：Web API - 95% 完成
 - [x] Native Ops 桥接 - V8-Rust 桥接，支持从 JavaScript 调用 Rust
 - [x] Fetch API (HTTP 客户端) - 完整的异步 HTTP/HTTPS 支持，包含 headers、timeout、POST
 - [x] 异步/await 桥接 - V8 Promise 与 Tokio 事件循环集成
 - [x] 异步文件操作 - Deno.readTextFile、writeTextFile、copy、readDir、rename 返回 Promise
 - [x] 动态导入 - Deno.importModule() 返回 Promise 用于异步模块加载
 - [x] HTTP 服务器 - Deno.serve() 用于构建 HTTP 服务器
+- [x] 文本编码/解码 - TextEncoder/TextDecoder API 支持 UTF-8 编码/解码
 - [ ] WebSocket - 已设计，待实现
-- [ ] 文本编码/解码
 - [ ] URL/URLSearchParams
 
 ### 第三阶段：开发工具 - 30% 完成
@@ -318,7 +343,7 @@ ferrum/
 ### 优先领域
 
 1. **WebSocket 支持** - 实现 WebSocket 客户端 API
-2. **文本编码** - 实现 TextEncoder/TextDecoder API
+2. **文本编码** - ✅ 已实现 TextEncoder/TextDecoder API
 3. **URL/URLSearchParams** - 实现 URL API 以支持 Web 兼容性
 4. **测试** - 为异步操作添加更多集成测试
 

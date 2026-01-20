@@ -10,7 +10,7 @@ English | [简体中文](README.zh-CN.md)
 
 **Version:** 0.2.0 (Alpha)
 **Phase 1:** ✅ 100% Complete
-**Phase 2:** 90% Complete (HTTP Server now implemented!)
+**Phase 2:** 95% Complete (TextEncoder/TextDecoder implemented!)
 
 This is an early-stage project with Phase 1 core functionality fully implemented. Phase 2 (Web APIs) is now 90% complete with HTTP server support and native ops bridge.
 
@@ -27,6 +27,7 @@ This is an early-stage project with Phase 1 core functionality fully implemented
 - **Network Operations**: DNS resolution, HTTP fetch (GET, POST, headers, timeout), HTTP Server (Deno.serve)
 - **Timer API**: setTimeout, setInterval, Deno.sleep, Promise support
 - **Path Utilities**: Cross-platform path manipulation
+- **Text Encoding**: TextEncoder, TextDecoder (UTF-8)
 
 ### Developer Experience
 - **REPL**: Interactive shell with multi-line support
@@ -149,6 +150,30 @@ console.log("Server started on", await server.addr());
 Run with:
 ```bash
 ferrum run --allow-net server.js
+```
+
+### Text Encoding
+```javascript
+// encoding.js
+// TextEncoder encodes strings to UTF-8 bytes
+const encoder = new TextEncoder();
+const bytes = encoder.encode("Hello, 世界! 🎉");
+console.log("Encoded bytes:", bytes);
+
+// TextDecoder decodes UTF-8 bytes to strings
+const decoder = new TextDecoder();
+const decoded = decoder.decode(bytes);
+console.log("Decoded string:", decoded);
+
+// encodeInto for efficient encoding into pre-allocated buffer
+const dest = new Uint8Array(10);
+const result = encoder.encodeInto("Hello", dest);
+console.log(`Read: ${result.read}, Written: ${result.written}`);
+```
+
+Run with:
+```bash
+ferrum run encoding.js
 ```
 
 ## Permission System
@@ -276,15 +301,15 @@ This is an alpha release. The following features are **not yet implemented**:
 - [x] V8-Rust bridge
 - [x] Import map support
 
-### Phase 2: Web APIs - 90% Complete
+### Phase 2: Web APIs - 95% Complete
 - [x] Native Ops Bridge - V8-Rust bridge for calling Rust from JavaScript
 - [x] Fetch API (HTTP client) - Full async HTTP/HTTPS support with headers, timeout, POST
 - [x] Async/Await Bridge - V8 Promise integration with Tokio event loop
 - [x] Async File Operations - Deno.readTextFile, writeTextFile, copy, readDir, rename
 - [x] Dynamic Imports - Deno.importModule() returns Promise for async module loading
 - [x] HTTP Server - Deno.serve() for building HTTP servers
+- [x] Text Encoding - TextEncoder/TextDecoder APIs for UTF-8 encoding/decoding
 - [ ] WebSocket - API designed, needs implementation
-- [ ] Text encoding/decoding
 - [ ] URL/URLSearchParams
 
 ### Phase 3: Developer Tools - 30% Complete
@@ -319,7 +344,7 @@ Contributions are welcome! This is an early-stage project and there's plenty to 
 ### Priority Areas
 
 1. **WebSocket Support** - Implement WebSocket client API
-2. **Text Encoding** - Implement TextEncoder/TextDecoder APIs
+2. **Text Encoding** - ✅ Implemented TextEncoder/TextDecoder APIs
 3. **URL/URLSearchParams** - Implement URL API for web compatibility
 4. **Tests** - Add more integration tests for async operations
 
