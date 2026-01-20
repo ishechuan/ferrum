@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use thiserror::Error;
 
 use v8::{CreateParams, Module, OwnedIsolate, Platform, Script};
@@ -16,6 +16,11 @@ use crate::ops::async_bindings::{bootstrap_async_globals, clear_async_context};
 use crate::ops::async_ops::{OpState, PromiseRegistry};
 use crate::ops::bindings::bootstrap_globals;
 use crate::ops::dispatch::OpRegistry;
+use crate::ops::net::{serve, ServerState};
+use crate::ops::timer_bindings::{
+    bootstrap_timer_globals, clear_timer_globals, execute_timer_callbacks,
+};
+use crate::ops::timers::TimerRegistry;
 use crate::permissions::Permissions;
 
 /// Errors that can occur during runtime operations
@@ -146,6 +151,67 @@ pub struct RuntimeContext {
     pub permissions: Arc<Mutex<Permissions>>,
     /// Operation registry (for dispatching native ops)
     pub registry: Arc<Mutex<OpRegistry>>,
+    /// HTTP server registry (for managing active servers)
+    pub server_registry: Arc<Mutex<ServerRegistry>>,
+}
+
+/// Registry for active HTTP servers
+#[derive(Debug, Default)]
+pub struct ServerRegistry {
+    /// Map of server ID to server state
+    servers: HashMap<String, ServerState>,
+    /// Counter for generating unique server IDs
+    next_id: std::sync::atomic::AtomicU64,
+}
+
+impl ServerRegistry {
+    /// Create a new server registry
+    pub fn new() -> Self {
+        Self {
+            servers: HashMap::new(),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+
+    /// Add a server and return its ID
+    pub fn add(&mut self, server: ServerState) -> String {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .to_string();
+        self.servers.insert(id.clone(), server);
+        id
+    }
+
+    /// Get a server by ID
+    pub fn get(&self, id: &str) -> Option<&ServerState> {
+        self.servers.get(id)
+    }
+
+    /// Remove a server by ID (and close it)
+    pub async fn remove(&mut self, id: &str) -> Option<ServerState> {
+        if let Some(mut server) = self.servers.remove(id) {
+            *server.listening.write().await = false;
+            Some(server)
+        } else {
+            None
+        }
+    }
+
+    /// Check if a server exists
+    pub fn contains(&self, id: &str) -> bool {
+        self.servers.contains_key(id)
+    }
+
+    /// Get the number of active servers
+    pub fn len(&self) -> usize {
+        self.servers.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
 }
 
 impl RuntimeContext {
@@ -155,6 +221,7 @@ impl RuntimeContext {
         Self {
             permissions: Arc::new(Mutex::new(permissions)),
             registry: Arc::new(Mutex::new(registry)),
+            server_registry: Arc::new(Mutex::new(ServerRegistry::new())),
         }
     }
 }
@@ -367,14 +434,30 @@ impl JsRuntime {
     /// # Returns
     /// The result of the last expression evaluated (after all Promises resolve)
     pub fn execute_async(&mut self, code: &str, _filename: Option<&str>) -> RuntimeResult<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                RuntimeError::ExecutionError(format!("Failed to create tokio runtime: {}", e))
+            })?;
+
+        rt.block_on(async { self.execute_async_inner(code).await })
+    }
+
+    async fn execute_async_inner(&mut self, code: &str) -> RuntimeResult<String> {
         let op_state = Arc::new(std::sync::Mutex::new(OpState::new()));
         let promise_registry = Arc::new(std::sync::Mutex::new(PromiseRegistry::new()));
         let permissions = Arc::new(std::sync::Mutex::new(self.permissions.clone()));
+
+        // Create timer registry and callback channel for timer support
+        let timer_registry = Arc::new(TimerRegistry::new());
+        let (timer_callback_tx, timer_callback_rx) = std::sync::mpsc::channel();
 
         let scope = &mut v8::HandleScope::new(&mut self.isolate);
         let context = v8::Context::new(scope);
         let scope = &mut v8::ContextScope::new(scope, context);
 
+        // Bootstrap async globals (Deno async APIs)
         if let Err(e) = bootstrap_async_globals(
             scope,
             op_state.clone(),
@@ -388,11 +471,20 @@ impl JsRuntime {
             )));
         }
 
+        // Bootstrap timer globals (setTimeout, setInterval, etc.)
+        if let Err(e) = bootstrap_timer_globals(scope, timer_registry.clone(), timer_callback_tx) {
+            tracing::error!("Failed to bootstrap timer globals: {}", e);
+            return Err(RuntimeError::InitializationError(format!(
+                "Failed to bootstrap timer globals: {}",
+                e
+            )));
+        }
+
         let source = v8::String::new(scope, code).ok_or_else(|| {
             RuntimeError::CompilationError("Failed to create source string".into())
         })?;
 
-        let script = Script::compile(scope, source, None)
+        let script = v8::Script::compile(scope, source, None)
             .ok_or_else(|| RuntimeError::CompilationError("Script compilation failed".into()))?;
 
         let result = script
@@ -414,6 +506,9 @@ impl JsRuntime {
             }
 
             scope.perform_microtask_checkpoint();
+
+            // Execute any pending timer callbacks
+            let _ = execute_timer_callbacks(scope, &timer_callback_rx);
 
             let completed = {
                 let waker = futures::task::noop_waker();
@@ -501,6 +596,9 @@ impl JsRuntime {
 
             scope.perform_microtask_checkpoint();
 
+            // Execute any timer callbacks that were triggered
+            let _ = execute_timer_callbacks(scope, &timer_callback_rx);
+
             let has_pending_ops = op_state.lock().unwrap().has_pending();
             let has_pending_promises = promise_registry.lock().unwrap().has_pending();
 
@@ -508,7 +606,7 @@ impl JsRuntime {
                 break;
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
 
         if result.is_promise() {
@@ -522,6 +620,7 @@ impl JsRuntime {
                     let rejected_value = promise.result(scope);
                     let error_msg = rejected_value.to_rust_string_lossy(scope);
                     clear_async_context();
+                    clear_timer_globals();
                     return Err(RuntimeError::ExecutionError(format!(
                         "Promise rejected: {}",
                         error_msg
@@ -534,6 +633,7 @@ impl JsRuntime {
         }
 
         clear_async_context();
+        clear_timer_globals();
 
         self.stats.borrow_mut().scripts_executed += 1;
 

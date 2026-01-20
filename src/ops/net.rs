@@ -13,7 +13,6 @@ use crate::permissions::{Permissions, PermissionError};
 // HTTP client types
 use hyper::body::Incoming;
 use hyper::http::HeaderValue;
-use hyper::Request;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -268,7 +267,7 @@ pub fn fetch(url: &str, options: Option<FetchOptions>, permissions: &Permissions
 
         // Build the HTTP request
         let method = opts.method.unwrap_or(HttpMethod::GET);
-        let mut request_builder = Request::builder()
+        let mut request_builder = hyper::Request::builder()
             .method(method.as_str())
             .uri(&absolute_uri);
 
@@ -833,5 +832,635 @@ mod tests {
         assert!(opts.timeout.is_some());
         assert!(opts.headers.is_some());
         assert!(opts.redirect.is_some());
+    }
+}
+
+// ============================================================================
+// HTTP Server
+// ============================================================================
+
+use hyper::StatusCode;
+use serde::Serialize;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use futures::StreamExt as _;
+
+/// HTTP Server configuration
+#[derive(Debug, Clone, Default)]
+pub struct ServerOptions {
+    /// Port to listen on (default: 8000)
+    pub port: Option<u16>,
+    /// Host to bind to (default: "0.0.0.0")
+    pub hostname: Option<String>,
+    /// Whether to reuse the address (default: true)
+    pub reuse_port: Option<bool>,
+    /// Server timeout in milliseconds (default: 30000)
+    pub timeout: Option<u64>,
+}
+
+/// HTTP request handler options
+#[derive(Clone)]
+pub struct ServeHandlerOptions {
+    /// The handler function that will be called for each request
+    pub handler: Arc<dyn Fn(Request) -> Response + Send + Sync>,
+}
+
+/// HTTP request object passed to the handler
+#[derive(Debug, Clone)]
+pub struct Request {
+    /// HTTP method
+    pub method: String,
+    /// Request URL path
+    pub url: String,
+    /// Request headers
+    pub headers: std::collections::HashMap<String, String>,
+    /// Request body as text
+    pub body: String,
+    /// Peer address of the client
+    pub peer_addr: Option<String>,
+}
+
+/// HTTP response returned by the handler
+#[derive(Debug, Clone)]
+pub struct Response {
+    /// HTTP status code (default: 200)
+    pub status: u16,
+    /// HTTP status text (auto-derived from status code if not provided)
+    pub status_text: Option<String>,
+    /// Response headers
+    pub headers: std::collections::HashMap<String, String>,
+    /// Response body
+    pub body: Option<String>,
+}
+
+impl Default for Response {
+    fn default() -> Self {
+        Self {
+            status: 200,
+            status_text: None,
+            headers: std::collections::HashMap::new(),
+            body: None,
+        }
+    }
+}
+
+impl Response {
+    /// Create a response with text body
+    pub fn text(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            status_text: Some("OK".to_string()),
+            headers: std::collections::HashMap::new(),
+            body: Some(body.into()),
+        }
+    }
+
+    /// Create a JSON response
+    pub fn json<T: Serialize>(value: &T) -> Result<Self, serde_json::Error> {
+        let body = serde_json::to_string(value)?;
+        Ok(Self {
+            status: 200,
+            status_text: Some("OK".to_string()),
+            headers: vec![("content-type".to_string(), "application/json".to_string())]
+                .into_iter()
+                .collect(),
+            body: Some(body),
+        })
+    }
+
+    /// Create an HTML response
+    pub fn html(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            status_text: Some("OK".to_string()),
+            headers: vec![("content-type".to_string(), "text/html; charset=utf-8".to_string())]
+                .into_iter()
+                .collect(),
+            body: Some(body.into()),
+        }
+    }
+
+    /// Create a JSON response with status code
+    pub fn json_with_status<T: Serialize>(value: &T, status: u16) -> Result<Self, serde_json::Error> {
+        let body = serde_json::to_string(value)?;
+        let status_text = get_status_text(status).to_string();
+        Ok(Self {
+            status,
+            status_text: Some(status_text),
+            headers: vec![("content-type".to_string(), "application/json".to_string())]
+                .into_iter()
+                .collect(),
+            body: Some(body),
+        })
+    }
+}
+
+/// Get HTTP status text from status code
+fn get_status_text(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
+
+/// Server listening state
+#[derive(Debug, Clone, Default)]
+pub struct ServerState {
+    pub listening: Arc<RwLock<bool>>,
+    pub addr: Arc<RwLock<Option<SocketAddr>>>,
+}
+
+impl ServerState {
+    /// Get the listening address
+    pub async fn addr(&self) -> Option<SocketAddr> {
+        *self.addr.read().await
+    }
+
+    /// Check if the server is listening
+    pub async fn is_listening(&self) -> bool {
+        *self.listening.read().await
+    }
+
+    /// Close the server
+    pub async fn close(&self) {
+        *self.listening.write().await = false;
+    }
+}
+
+/// HTTP Server structure
+pub struct HttpServer {
+    /// Server state for controlling the server
+    pub state: ServerState,
+    /// The actual server handle
+    _server: tokio::task::JoinHandle<()>,
+}
+
+impl HttpServer {
+    /// Create a new HTTP server
+    pub fn new(
+        handler: Arc<dyn Fn(Request) -> Response + Send + Sync>,
+        options: ServerOptions,
+    ) -> Result<Self, NetError> {
+        let port = options.port.unwrap_or(8000);
+        let hostname = options.hostname.unwrap_or_else(|| "0.0.0.0".to_string());
+        let addr = format!("{}:{}", hostname, port);
+
+        let state = ServerState {
+            listening: Arc::new(RwLock::new(false)),
+            addr: Arc::new(RwLock::new(None)),
+        };
+
+        let state_clone = state.clone();
+
+        let server = tokio::spawn(async move {
+            let addr: SocketAddr = match addr.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::error!("Failed to parse address {}: {}", addr, e);
+                    return;
+                }
+            };
+
+            // Create TCP listener
+            let listener = match tokio::net::TcpListener::bind(&addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!("Failed to bind to {}: {}", addr, e);
+                    return;
+                }
+            };
+
+            // Update the address (in case it was 0.0.0.0:0)
+            let actual_addr = listener.local_addr().unwrap();
+            *state_clone.addr.write().await = Some(actual_addr);
+            *state_clone.listening.write().await = true;
+
+            tracing::info!("HTTP server listening on http://{}", actual_addr);
+
+            loop {
+                // Check if we should stop
+                if !*state_clone.listening.read().await {
+                    break;
+                }
+
+                match listener.accept().await {
+                    Ok((stream, remote_addr)) => {
+                        // Clone state and handler for this connection
+                        let state = state_clone.clone();
+                        let handler = handler.clone();
+
+                        // Spawn a task to handle the connection
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, remote_addr, &handler).await {
+                                tracing::error!("Error handling connection: {}", e);
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to accept connection: {}", e);
+                    }
+                }
+            }
+
+            tracing::info!("HTTP server stopped");
+        });
+
+        Ok(Self {
+            state,
+            _server: server,
+        })
+    }
+
+    /// Get the listening address
+    pub async fn addr(&self) -> Option<SocketAddr> {
+        *self.state.addr.read().await
+    }
+
+    /// Check if the server is listening
+    pub async fn is_listening(&self) -> bool {
+        *self.state.listening.read().await
+    }
+
+    /// Close the server
+    pub async fn close(&self) {
+        *self.state.listening.write().await = false;
+    }
+}
+
+/// Handle a single HTTP connection
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
+    remote_addr: std::net::SocketAddr,
+    handler: &Arc<dyn Fn(Request) -> Response + Send + Sync>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Use hyper's HTTP service
+    let mut h = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let handler = handler.clone();
+
+        async move {
+            // Extract request information
+            let method = req.method().to_string();
+            let uri = req.uri().to_string();
+            let peer_addr = remote_addr.to_string();
+
+            // Extract headers
+            let mut headers = std::collections::HashMap::new();
+            for (name, value) in req.headers() {
+                let name_str: String = name.to_string();
+                if let Ok(value_str) = value.to_str() {
+                    headers.insert(name_str, value_str.to_string());
+                }
+            }
+
+            // Extract body
+            let mut body = Vec::new();
+            let mut body_stream = req.into_body();
+            while let Some(chunk) = body_stream.frame().await {
+                let chunk = chunk?;
+                if let Some(data) = chunk.data_ref() {
+                    body.extend_from_slice(data);
+                }
+            }
+            let body = String::from_utf8_lossy(&body).to_string();
+
+            // Create request object
+            let request = Request {
+                method,
+                url: uri,
+                headers,
+                body,
+                peer_addr: Some(peer_addr),
+            };
+
+            // Call the handler
+            let response = handler(request);
+
+            // Convert response to hyper response
+            let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let body_bytes = response.body.unwrap_or_default().into_bytes();
+            let body: http_body_util::Full<hyper::body::Bytes> = Full::from(body_bytes);
+            let mut hyper_response = hyper::Response::new(body);
+
+            *hyper_response.status_mut() = status;
+
+            // Set headers
+            for (name, value) in response.headers {
+                if let Ok(name) = hyper::header::HeaderName::from_bytes(name.as_bytes()) {
+                    if let Ok(value) = hyper::http::HeaderValue::from_str(&value) {
+                        hyper_response.headers_mut().insert(name, value);
+                    }
+                }
+            }
+
+            Ok::<_, hyper::Error>(hyper_response)
+        }
+    });
+
+    // Use hyper-util to handle the connection
+    use hyper_util::rt::TokioIo;
+    use hyper_util::server::conn::auto;
+    let mut server = auto::Builder::new(TokioExecutor::new());
+    let io = TokioIo::new(stream);
+    let conn = server.serve_connection(io, h).await;
+
+    match conn {
+        Ok(()) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Start an HTTP server with the given handler
+///
+/// # Arguments
+///
+/// * `handler` - A function that takes a Request and returns a Response
+/// * `options` - Optional server configuration
+///
+/// # Returns
+///
+/// A server object with a `close()` method to stop the server
+///
+/// # Example
+///
+/// ```javascript
+/// const server = Deno.serve((req) => {
+///     return new Response("Hello, World!", {
+///         headers: { "content-type": "text/plain" }
+///     });
+/// });
+///
+/// // Close the server later
+/// server.close();
+/// ```
+pub fn serve(
+    handler: Arc<dyn Fn(Request) -> Response + Send + Sync>,
+    options: Option<ServerOptions>,
+) -> Result<HttpServer, NetError> {
+    let opts = options.unwrap_or_default();
+    HttpServer::new(handler, opts)
+}
+
+/// Create a simple server that returns a JSON response
+pub fn serve_json<F, T>(
+    handler: F,
+    options: Option<ServerOptions>,
+) -> Result<HttpServer, NetError>
+where
+    F: Fn(Request) -> T + Send + Sync + 'static,
+    T: Serialize,
+{
+    let handler: Arc<dyn Fn(Request) -> Response + Send + Sync> = Arc::new(move |req: Request| -> Response {
+        let value = handler(req);
+        Response::json(&value).unwrap_or_else(|e| {
+            Response::json_with_status(
+                &serde_json::json!({ "error": e.to_string() }),
+                500,
+            )
+            .unwrap()
+        })
+    });
+
+    serve(handler, options)
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+
+    #[test]
+    fn test_response_text() {
+        let response = Response::text("Hello, World!");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, Some("Hello, World!".to_string()));
+    }
+
+    #[test]
+    fn test_response_html() {
+        let response = Response::html("<h1>Hello</h1>");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, Some("<h1>Hello</h1>".to_string()));
+        assert_eq!(
+            response.headers.get("content-type"),
+            Some(&"text/html; charset=utf-8".to_string())
+        );
+    }
+
+    #[test]
+    fn test_response_json() {
+        let response = Response::json(&serde_json::json!({"hello": "world"})).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, Some(r#"{"hello":"world"}"#.to_string()));
+        assert_eq!(
+            response.headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+    }
+
+    #[test]
+    fn test_response_json_with_status() {
+        let response = Response::json_with_status(
+            &serde_json::json!({"error": "not found"}),
+            404,
+        )
+        .unwrap();
+        assert_eq!(response.status, 404);
+        assert!(response.body.is_some());
+    }
+
+    #[test]
+    fn test_server_options_default() {
+        let opts = ServerOptions::default();
+        assert!(opts.port.is_none());
+        assert!(opts.hostname.is_none());
+        assert!(opts.reuse_port.is_none());
+        assert!(opts.timeout.is_none());
+    }
+
+    #[test]
+    fn test_server_options_with_values() {
+        let mut opts = ServerOptions::default();
+        opts.port = Some(8080);
+        opts.hostname = Some("127.0.0.1".to_string());
+        opts.timeout = Some(30000);
+
+        assert_eq!(opts.port, Some(8080));
+        assert_eq!(opts.hostname, Some("127.0.0.1".to_string()));
+        assert_eq!(opts.timeout, Some(30000));
+    }
+
+    #[test]
+    fn test_request_fields() {
+        let request = Request {
+            method: "GET".to_string(),
+            url: "/test/path".to_string(),
+            headers: vec![("content-type".to_string(), "application/json".to_string())]
+                .into_iter()
+                .collect(),
+            body: "test body".to_string(),
+            peer_addr: Some("127.0.0.1:12345".to_string()),
+        };
+
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.url, "/test/path");
+        assert!(request.headers.contains_key("content-type"));
+        assert_eq!(request.body, "test body");
+        assert_eq!(request.peer_addr, Some("127.0.0.1:12345".to_string()));
+    }
+
+    #[test]
+    fn test_response_default() {
+        let response = Response::default();
+        assert_eq!(response.status, 200);
+        assert!(response.status_text.is_none());
+        assert!(response.headers.is_empty());
+        assert!(response.body.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_http_server_creation() {
+        let handler = |_req: Request| Response::text("Hello");
+        let options = ServerOptions {
+            port: Some(0), // Use random available port
+            hostname: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
+
+        let server = serve(Arc::new(handler), Some(options));
+        assert!(server.is_ok());
+
+        let server = server.unwrap();
+
+        // Wait for the server to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        assert!(server.is_listening().await);
+
+        // Clean up - close the server
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_server_state_default() {
+        let state = ServerState::default();
+        assert!(!(*state.listening.read().await));
+        assert!((*state.addr.read().await).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_server_addr_after_start() {
+        let handler = |_req: Request| Response::text("Hello");
+        let options = ServerOptions {
+            port: Some(0),
+            hostname: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
+
+        let server = serve(Arc::new(handler), Some(options)).unwrap();
+
+        // Wait a bit for the server to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        let addr = server.addr().await;
+        assert!(addr.is_some());
+        let addr = addr.unwrap();
+        assert_eq!(addr.ip().to_string(), "127.0.0.1");
+        assert!(addr.port() > 0);
+
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_server_close() {
+        let handler = |_req: Request| Response::text("Hello");
+        let options = ServerOptions {
+            port: Some(0),
+            hostname: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
+
+        let server = serve(Arc::new(handler), Some(options)).unwrap();
+
+        // Wait for server to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        assert!(*server.state.listening.read().await);
+
+        // Close the server
+        server.close().await;
+
+        // Verify it's closed
+        assert!(!*server.state.listening.read().await);
+    }
+
+    #[tokio::test]
+    async fn test_server_on_different_ports() {
+        let handler: Arc<dyn Fn(Request) -> Response + Send + Sync> = Arc::new(|_req: Request| Response::text("Hello"));
+
+        let options1 = ServerOptions {
+            port: Some(0),
+            hostname: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
+
+        let server1 = serve(handler.clone(), Some(options1.clone())).unwrap();
+
+        // Wait for server to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let addr1 = server1.addr().await;
+
+        let options2 = ServerOptions {
+            port: Some(0),
+            hostname: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        };
+
+        let server2 = serve(handler.clone(), Some(options2.clone())).unwrap();
+
+        // Wait for server to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        let addr2 = server2.addr().await;
+
+        assert_ne!(addr1, addr2);
+
+        server1.close().await;
+        server2.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_response_with_headers() {
+        let mut response = Response::default();
+        response.status = 201;
+        response
+            .headers
+            .insert("Location".to_string(), "/new-resource".to_string());
+        response.body = Some("Created".to_string());
+
+        assert_eq!(response.status, 201);
+        assert_eq!(
+            response.headers.get("Location"),
+            Some(&"/new-resource".to_string())
+        );
+        assert_eq!(response.body, Some("Created".to_string()));
+    }
+
+    #[test]
+    fn test_get_status_text() {
+        assert_eq!(get_status_text(200), "OK");
+        assert_eq!(get_status_text(201), "Created");
+        assert_eq!(get_status_text(404), "Not Found");
+        assert_eq!(get_status_text(500), "Internal Server Error");
+        assert_eq!(get_status_text(999), "Unknown");
     }
 }

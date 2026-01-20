@@ -34,7 +34,7 @@ pub enum PermissionState {
     /// Permission granted for specific paths/addresses
     GrantedPartial {
         /// Set of paths or addresses that are allowed
-        paths: HashSet<String>
+        paths: HashSet<String>,
     },
     /// Permission denied
     Denied,
@@ -407,10 +407,7 @@ mod tests {
     #[test]
     fn test_run_permission_denied_by_default() {
         let perm = RunPermission::new();
-        assert!(matches!(
-            perm.check("ls"),
-            Err(PermissionError::Denied(_))
-        ));
+        assert!(matches!(perm.check("ls"), Err(PermissionError::Denied(_))));
     }
 
     #[test]

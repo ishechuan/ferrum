@@ -988,3 +988,247 @@ fn test_async_execute_file_stat() {
             || result_str.contains("object")
     );
 }
+
+// ============================================================================
+// Timer Integration Tests
+// ============================================================================
+
+/// Test setTimeout basic functionality
+#[test]
+fn test_set_timeout_basic() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        let executed = false;
+        setTimeout(() => { executed = true; }, 10);
+        // Return immediately, the callback will execute asynchronously
+        "timeout scheduled"
+    "#;
+    let result = runtime.execute_async(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "timeout scheduled");
+}
+
+/// Test setInterval basic functionality
+#[test]
+fn test_set_interval_basic() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        let count = 0;
+        const id = setInterval(() => { count++; }, 20);
+        setTimeout(() => { clearInterval(id); }, 100);
+        "interval started"
+    "#;
+    let result = runtime.execute_async(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "interval started");
+}
+
+/// Test clearTimeout
+#[test]
+fn test_clear_timeout() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        let executed = false;
+        const id = setTimeout(() => { executed = true; }, 50);
+        clearTimeout(id);
+        "cleared"
+    "#;
+    let result = runtime.execute_async(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "cleared");
+}
+
+/// Test clearInterval
+#[test]
+fn test_clear_interval() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        let count = 0;
+        const id = setInterval(() => { count++; }, 10);
+        clearInterval(id);
+        "stopped"
+    "#;
+    let result = runtime.execute_async(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "stopped");
+}
+
+/// Test multiple timers
+#[test]
+fn test_multiple_timers() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        let result = "";
+        setTimeout(() => { result += "A"; }, 30);
+        setTimeout(() => { result += "B"; }, 20);
+        setTimeout(() => { result += "C"; }, 40);
+        "timers set"
+    "#;
+    let result = runtime.execute_async(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "timers set");
+}
+
+// ============================================================================
+// HTTP Server Integration Tests
+// ============================================================================
+
+/// Test Deno.serve() creates a server object
+#[test]
+fn test_deno_serve_creates_server() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return { status: 200, body: "Hello" };
+        });
+        typeof server;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    // Server should be an object
+    assert_eq!(result.unwrap(), "object");
+}
+
+/// Test Deno.serve() returns object with addr method
+#[test]
+fn test_deno_serve_has_addr_method() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return { status: 200, body: "Hello" };
+        });
+        typeof server.addr;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "function");
+}
+
+/// Test Deno.serve() returns object with close method
+#[test]
+fn test_deno_serve_has_close_method() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return { status: 200, body: "Hello" };
+        });
+        typeof server.close;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "function");
+}
+
+/// Test Deno.serve() returns object with listening property
+#[test]
+fn test_deno_serve_has_listening_property() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return { status: 200, body: "Hello" };
+        });
+        typeof server.listening;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "function");
+}
+
+/// Test Deno.serve() with custom port
+#[test]
+fn test_deno_serve_with_port() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return { status: 200, body: "Hello" };
+        }, { port: 9999 });
+        typeof server;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "object");
+}
+
+/// Test Deno.serve() with custom hostname
+#[test]
+fn test_deno_serve_with_hostname() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return { status: 200, body: "Hello" };
+        }, { hostname: "localhost" });
+        typeof server;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "object");
+}
+
+/// Test Deno.serve() without handler throws error
+#[test]
+fn test_deno_serve_requires_handler() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        Deno.serve();
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_err());
+}
+
+/// Test Deno.serve() with handler that returns response with headers
+#[test]
+fn test_deno_serve_response_with_headers() {
+    init_v8_for_tests();
+
+    let mut runtime = create_unsafe_runtime().unwrap();
+    let code = r#"
+        const server = Deno.serve((req) => {
+            return {
+                status: 200,
+                body: "Hello",
+                headers: { "Content-Type": "text/plain" }
+            };
+        });
+        typeof server;
+    "#;
+    let result = runtime.execute(code, None);
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), "object");
+}

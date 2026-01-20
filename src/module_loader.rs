@@ -166,7 +166,8 @@ impl ImportMap {
         // Sort by prefix length (longest first) for proper matching
         let entry = ImportMapEntry { prefix, target };
         self.entries.push(entry);
-        self.entries.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+        self.entries
+            .sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
     }
 
     /// Resolve a specifier using the import map
@@ -259,6 +260,7 @@ impl Default for ModuleLoaderConfig {
 }
 
 /// ES Module Loader
+#[derive(Clone)]
 pub struct ModuleLoader {
     /// Runtime permissions
     permissions: Permissions,
@@ -318,8 +320,7 @@ impl ModuleLoader {
                     format!("{}/{}", url_path, specifier.trim_start_matches("./"))
                 } else {
                     // For file paths, resolve relative to the referrer directory
-                    let referrer_dir = Path::new(referrer_path).parent()
-                        .unwrap_or(Path::new("."));
+                    let referrer_dir = Path::new(referrer_path).parent().unwrap_or(Path::new("."));
                     // Join and normalize the path
                     let joined = referrer_dir.join(specifier);
                     normalize_path(joined.to_string_lossy().as_ref())
@@ -430,8 +431,8 @@ impl ModuleLoader {
             .map_err(|e| ModuleError::PermissionDenied(e.to_string()))?;
 
         // Parse URL to get hostname
-        let parsed = url::Url::parse(url)
-            .map_err(|_| ModuleError::InvalidSpecifier(url.to_string()))?;
+        let parsed =
+            url::Url::parse(url).map_err(|_| ModuleError::InvalidSpecifier(url.to_string()))?;
         let host = parsed.host_str().unwrap_or("unknown");
 
         // Check permission for specific host
@@ -455,6 +456,7 @@ impl ModuleLoader {
         // Match: import ... from "..." and import(...)
         let import_patterns = [
             r#"import\s+.*?from\s+['"]([^'"]+)['"]"#,
+            r#"import\s*\(\s*`([^`]+)`\)"#,
             r#"import\s*\(\s*['"]([^'"]+)['"]"#,
             r#"export\s+.*?from\s+['"]([^'"]+)['"]"#,
         ];
@@ -473,7 +475,11 @@ impl ModuleLoader {
     }
 
     /// Load and resolve a complete module
-    pub async fn load_module(&self, specifier: &str, referrer: Option<&str>) -> ModuleResult<ResolvedModule> {
+    pub async fn load_module(
+        &self,
+        specifier: &str,
+        referrer: Option<&str>,
+    ) -> ModuleResult<ResolvedModule> {
         // Check for circular dependency
         let loading = self.loading.lock().await;
         if loading.contains(&specifier.to_string()) {
@@ -508,11 +514,16 @@ impl ModuleLoader {
 
         // Cache the module
         if self.config.cache_enabled {
-            self.cache.insert(resolved_specifier.clone(), module.clone()).await;
+            self.cache
+                .insert(resolved_specifier.clone(), module.clone())
+                .await;
         }
 
         // Remove from loading list
-        self.loading.lock().await.retain(|s| s != &resolved_specifier);
+        self.loading
+            .lock()
+            .await
+            .retain(|s| s != &resolved_specifier);
 
         Ok(module)
     }
@@ -546,7 +557,10 @@ mod tests {
     #[test]
     fn test_import_map() {
         let mut map = ImportMap::new("https://example.com/".to_string());
-        map.insert("lodash/".to_string(), "https://cdn.example.com/lodash/".to_string());
+        map.insert(
+            "lodash/".to_string(),
+            "https://cdn.example.com/lodash/".to_string(),
+        );
 
         let resolved = map.resolve("lodash/map").unwrap();
         assert_eq!(resolved, "https://cdn.example.com/lodash/map");
@@ -569,11 +583,15 @@ mod tests {
         let loader = create_test_loader();
 
         // Relative path with referrer
-        let resolved = loader.resolve("./utils.js", Some("/home/user/main.js")).unwrap();
+        let resolved = loader
+            .resolve("./utils.js", Some("/home/user/main.js"))
+            .unwrap();
         assert_eq!(resolved, "/home/user/utils.js");
 
         // Parent directory
-        let resolved = loader.resolve("../shared/lib.js", Some("/home/user/main.js")).unwrap();
+        let resolved = loader
+            .resolve("../shared/lib.js", Some("/home/user/main.js"))
+            .unwrap();
         assert_eq!(resolved, "/home/shared/lib.js");
     }
 
@@ -591,7 +609,9 @@ mod tests {
 
         let loader = ModuleLoader::new(Permissions::allow_all(), config);
 
-        let resolved = loader.resolve("https://example.com/module.js", None).unwrap();
+        let resolved = loader
+            .resolve("https://example.com/module.js", None)
+            .unwrap();
         assert_eq!(resolved, "https://example.com/module.js");
     }
 
@@ -656,18 +676,102 @@ mod tests {
     async fn test_module_cache_clear() {
         let cache = ModuleCache::new();
 
-        cache.insert("test".to_string(), ResolvedModule {
-            specifier: "test".to_string(),
-            source: ModuleSource {
-                specifier: "test".to_string(),
-                code: "test".to_string(),
-                module_type: ModuleType::ESModule,
-            },
-            dependencies: vec![],
-        }).await;
+        cache
+            .insert(
+                "test".to_string(),
+                ResolvedModule {
+                    specifier: "test".to_string(),
+                    source: ModuleSource {
+                        specifier: "test".to_string(),
+                        code: "test".to_string(),
+                        module_type: ModuleType::ESModule,
+                    },
+                    dependencies: vec![],
+                },
+            )
+            .await;
 
         assert!(cache.contains("test").await);
         cache.clear().await;
         assert!(!cache.contains("test").await);
+    }
+
+    #[test]
+    fn test_parse_dynamic_import() {
+        let loader = create_test_loader();
+
+        let source = ModuleSource {
+            specifier: "test.js".to_string(),
+            code: r#"
+                // Static imports
+                import { foo } from './foo.js';
+                import bar from './bar.js';
+
+                // Dynamic import
+                const module = await import('./dynamic.js');
+                const utils = await import('./utils.mjs');
+
+                // Conditional dynamic import
+                if (condition) {
+                    await import('./optional.js');
+                }
+            "#
+            .to_string(),
+            module_type: ModuleType::ESModule,
+        };
+
+        let deps = loader.parse_dependencies(&source);
+        assert!(deps.contains(&"./foo.js".to_string()));
+        assert!(deps.contains(&"./bar.js".to_string()));
+        assert!(deps.contains(&"./dynamic.js".to_string()));
+        assert!(deps.contains(&"./utils.mjs".to_string()));
+        assert!(deps.contains(&"./optional.js".to_string()));
+    }
+
+    #[test]
+    fn test_parse_dynamic_import_with_template() {
+        let loader = create_test_loader();
+
+        let source = ModuleSource {
+            specifier: "test.js".to_string(),
+            code: r#"
+                const moduleName = 'feature';
+                await import(`./${moduleName}.js`);
+            "#
+            .to_string(),
+            module_type: ModuleType::ESModule,
+        };
+
+        let deps = loader.parse_dependencies(&source);
+        assert!(deps.contains(&"./${moduleName}.js".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_load_module_with_dynamic_imports() {
+        let permissions = Permissions::allow_all();
+        let config = ModuleLoaderConfig::default();
+        let loader = ModuleLoader::new(permissions, config);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let main_file = temp_dir.path().join("main.js");
+        let utils_file = temp_dir.path().join("utils.js");
+
+        std::fs::write(&utils_file, "export const add = (a, b) => a + b;").unwrap();
+        std::fs::write(
+            &main_file,
+            r#"
+                import { add } from './utils.js';
+                const utils = await import('./utils.js');
+                export const result = utils.add(2, 3);
+            "#,
+        )
+        .unwrap();
+
+        let main_path = main_file.to_string_lossy().to_string();
+        let result = loader.load_module(&main_path, None).await;
+
+        assert!(result.is_ok());
+        let module = result.unwrap();
+        assert_eq!(module.specifier, main_path);
     }
 }

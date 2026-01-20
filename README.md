@@ -8,11 +8,11 @@ English | [简体中文](README.zh-CN.md)
 
 ## Status
 
-**Version:** 0.1.0 (Alpha)
+**Version:** 0.2.0 (Alpha)
 **Phase 1:** ✅ 100% Complete
-**Phase 2:** 40% Complete (Async/Promise support added!)
+**Phase 2:** 90% Complete (HTTP Server now implemented!)
 
-This is an early-stage project with Phase 1 core functionality fully implemented. Phase 2 (Web APIs) is now 40% complete with the addition of full async/await and Promise support.
+This is an early-stage project with Phase 1 core functionality fully implemented. Phase 2 (Web APIs) is now 90% complete with HTTP server support and native ops bridge.
 
 ## Features
 
@@ -24,8 +24,8 @@ This is an early-stage project with Phase 1 core functionality fully implemented
 
 ### Standard Library
 - **File System API**: Read, write, copy, rename, directory operations (all async!)
-- **Network Operations**: DNS resolution, HTTP fetch (in progress)
-- **Timer API**: setTimeout, Deno.sleep, Promise support
+- **Network Operations**: DNS resolution, HTTP fetch (GET, POST, headers, timeout), HTTP Server (Deno.serve)
+- **Timer API**: setTimeout, setInterval, Deno.sleep, Promise support
 - **Path Utilities**: Cross-platform path manipulation
 
 ### Developer Experience
@@ -107,7 +107,48 @@ console.log(ips);
 
 Run with:
 ```bash
-ferrum run --allow-net dns.js
+ ferrum run --allow-net dns.js
+ ```
+
+### Dynamic Imports
+```javascript
+// main.js
+// Load a module at runtime using Deno.importModule() (returns Promise)
+const moduleCode = await Deno.importModule("./utils.js");
+const utils = new Function(moduleCode)();
+console.log(utils.add(2, 3)); // 5
+```
+
+```javascript
+// utils.js
+const add = (a, b) => a + b;
+const subtract = (a, b) => a - b;
+"return { add, subtract }";
+```
+
+Run with:
+```bash
+ferrum run --allow-read main.js
+```
+
+### HTTP Server
+```javascript
+// server.js
+// Start an HTTP server using Deno.serve()
+const server = Deno.serve((req) => {
+    return {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+        body: "Hello from Ferrum HTTP Server!\n"
+    };
+}, { port: 8080, hostname: "0.0.0.0" });
+
+console.log("Server started on", await server.addr());
+```
+
+Run with:
+```bash
+ferrum run --allow-net server.js
 ```
 
 ## Permission System
@@ -205,16 +246,13 @@ ferrum/
 This is an alpha release. The following features are **not yet implemented**:
 
 ### Network
-- **HTTP/HTTPS fetch** - API structure exists, needs HTTP client integration (reqwest/hyper)
-- **WebSocket** - Designed but not implemented
-- **TCP connections** - Designed but not implemented
-
-### Module Loading
+- **WebSocket** - API designed, needs implementation
+- **TCP connections** - API designed, needs implementation
 - **ES Module imports** - Module loader works for `.mjs` files, but dynamic imports (`import()`) not yet supported
 - **Module resolution callback** - Basic implementation, needs enhancement for complex import graphs
 
 ### Timers
-- **setInterval** - Timer infrastructure works, but callback execution needs proper `FnMut` handling
+- **setInterval** - Fully implemented with proper FnMut callback handling
 
 ### TypeScript
 - **TypeScript support** - Planned for Phase 4
@@ -238,14 +276,16 @@ This is an alpha release. The following features are **not yet implemented**:
 - [x] V8-Rust bridge
 - [x] Import map support
 
-### Phase 2: Web APIs - 50% Complete
-- [x] Fetch API (HTTP client) - Implemented with full async support
+### Phase 2: Web APIs - 90% Complete
+- [x] Native Ops Bridge - V8-Rust bridge for calling Rust from JavaScript
+- [x] Fetch API (HTTP client) - Full async HTTP/HTTPS support with headers, timeout, POST
 - [x] Async/Await Bridge - V8 Promise integration with Tokio event loop
-- [x] Async File Operations - Deno.readTextFile, writeTextFile, etc. now return Promises
+- [x] Async File Operations - Deno.readTextFile, writeTextFile, copy, readDir, rename
+- [x] Dynamic Imports - Deno.importModule() returns Promise for async module loading
+- [x] HTTP Server - Deno.serve() for building HTTP servers
 - [ ] WebSocket - API designed, needs implementation
 - [ ] Text encoding/decoding
 - [ ] URL/URLSearchParams
-- [ ] HTTP Server
 
 ### Phase 3: Developer Tools - 30% Complete
 - [x] Test runner CLI - needs JavaScript integration
@@ -278,12 +318,10 @@ Contributions are welcome! This is an early-stage project and there's plenty to 
 
 ### Priority Areas
 
-1. **HTTP Client Integration** - Fetch API is now implemented, test and enhance
-2. **WebSocket Support** - Implement WebSocket client API
-3. **setInterval Fix** - Proper FnMut callback handling
-4. **Dynamic Imports** - Implement `import()` for dynamic module loading
-5. **Module Resolution** - Enhance module resolution for complex import graphs
-6. **Tests** - Add more integration tests for async operations
+1. **WebSocket Support** - Implement WebSocket client API
+2. **Text Encoding** - Implement TextEncoder/TextDecoder APIs
+3. **URL/URLSearchParams** - Implement URL API for web compatibility
+4. **Tests** - Add more integration tests for async operations
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines (coming soon).
 

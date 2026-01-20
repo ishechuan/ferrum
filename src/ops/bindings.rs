@@ -41,9 +41,7 @@ fn set_current_context(context: Arc<RuntimeContext>) {
 
 /// Get the current runtime context for this thread
 fn get_current_context() -> Option<Arc<RuntimeContext>> {
-    CURRENT_CONTEXT.with(|ctx| {
-        ctx.borrow().clone()
-    })
+    CURRENT_CONTEXT.with(|ctx| ctx.borrow().clone())
 }
 
 /// Clear the current runtime context for this thread
@@ -155,7 +153,10 @@ fn extract_bytes_arg(
     if arg.is_array_buffer() {
         let buffer = v8::Local::<v8::ArrayBuffer>::try_from(arg).ok()?;
         let backing_store = buffer.get_backing_store();
-        let bytes: Vec<u8> = backing_store.iter().map(|cell: &Cell<u8>| cell.get()).collect();
+        let bytes: Vec<u8> = backing_store
+            .iter()
+            .map(|cell: &Cell<u8>| cell.get())
+            .collect();
         Some(bytes)
     }
     // Handle Uint8Array
@@ -171,7 +172,8 @@ fn extract_bytes_arg(
             let backing_store = buffer.get_backing_store();
             let offset = array.byte_offset() as usize;
             let length = array.byte_length() as usize;
-            let bytes: Vec<u8> = backing_store.iter()
+            let bytes: Vec<u8> = backing_store
+                .iter()
                 .skip(offset)
                 .take(length)
                 .map(|cell: &Cell<u8>| cell.get())
@@ -185,8 +187,7 @@ fn extract_bytes_arg(
     else if arg.is_string() {
         let str_val = arg.to_rust_string_lossy(scope);
         Some(str_val.into_bytes())
-    }
-    else {
+    } else {
         None
     }
 }
@@ -850,6 +851,257 @@ pub fn op_remove(
     }
 }
 
+/// Deno.copy() implementation
+///
+/// Copies a file from source to destination.
+///
+/// # JavaScript Signature
+/// ```javascript
+/// async function Deno.copy(src: string, dest: string): Promise<number>
+/// ```
+///
+/// # Example
+/// ```javascript
+/// await Deno.copy("./source.txt", "./dest.txt");
+/// ```
+pub fn op_copy(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let src = match extract_string_arg(scope, &args, 0) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "copy requires a string source path argument");
+            return;
+        }
+    };
+
+    let dest = match extract_string_arg(scope, &args, 1) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "copy requires a string destination path argument");
+            return;
+        }
+    };
+
+    let permissions = ctx.permissions.lock().unwrap();
+
+    match fs::copy(&src, &dest, &permissions) {
+        Ok(bytes) => {
+            let num_val = v8::Number::new(scope, bytes as f64);
+            rv.set(num_val.into());
+        }
+        Err(e) => {
+            throw_error(scope, &format!("copy: {}", e));
+        }
+    }
+}
+
+/// Deno.readDir() implementation
+///
+/// Reads a directory and returns an array of entries.
+///
+/// # JavaScript Signature
+/// ```javascript
+/// async function Deno.readDir(path: string): Promise<DirEntry[]>
+/// ```
+///
+/// # DirEntry
+/// - name: string
+/// - isFile: boolean
+/// - isDirectory: boolean
+/// - isSymlink: boolean
+///
+/// # Example
+/// ```javascript
+/// const entries = await Deno.readDir("./src");
+/// for (const entry of entries) {
+///     console.log(entry.name, entry.isFile);
+/// }
+/// ```
+pub fn op_read_dir(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let path = match extract_string_arg(scope, &args, 0) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "readDir requires a string path argument");
+            return;
+        }
+    };
+
+    let permissions = ctx.permissions.lock().unwrap();
+
+    match fs::read_dir(&path, &permissions) {
+        Ok(entries) => {
+            let array = v8::Array::new(scope, entries.len() as i32);
+
+            for (i, entry) in entries.iter().enumerate() {
+                let obj = v8::Object::new(scope);
+
+                let key_name = v8::String::new(scope, "name").unwrap();
+                let val_name = v8::String::new(scope, &entry.name).unwrap();
+                obj.set(scope, key_name.into(), val_name.into());
+
+                let key_is_file = v8::String::new(scope, "isFile").unwrap();
+                let val_is_file = v8::Boolean::new(scope, entry.is_file);
+                obj.set(scope, key_is_file.into(), val_is_file.into());
+
+                let key_is_dir = v8::String::new(scope, "isDirectory").unwrap();
+                let val_is_dir = v8::Boolean::new(scope, entry.is_directory);
+                obj.set(scope, key_is_dir.into(), val_is_dir.into());
+
+                let key_is_symlink = v8::String::new(scope, "isSymlink").unwrap();
+                let val_is_symlink = v8::Boolean::new(scope, entry.is_symlink);
+                obj.set(scope, key_is_symlink.into(), val_is_symlink.into());
+
+                array.set_index(scope, i as u32, obj.into());
+            }
+
+            rv.set(array.into());
+        }
+        Err(e) => {
+            throw_error(scope, &format!("readDir: {}", e));
+        }
+    }
+}
+
+/// Deno.rename() implementation
+///
+/// Renames a file or directory.
+///
+/// # JavaScript Signature
+/// ```javascript
+/// async function Deno.rename(oldPath: string, newPath: string): Promise<void>
+/// ```
+///
+/// # Example
+/// ```javascript
+/// await Deno.rename("./old.txt", "./new.txt");
+/// ```
+pub fn op_rename(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let old_path = match extract_string_arg(scope, &args, 0) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "rename requires a string oldPath argument");
+            return;
+        }
+    };
+
+    let new_path = match extract_string_arg(scope, &args, 1) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "rename requires a string newPath argument");
+            return;
+        }
+    };
+
+    let permissions = ctx.permissions.lock().unwrap();
+
+    match fs::rename(&old_path, &new_path, &permissions) {
+        Ok(_) => {
+            rv.set_undefined();
+        }
+        Err(e) => {
+            throw_error(scope, &format!("rename: {}", e));
+        }
+    }
+}
+
+/// Deno.importModule() implementation for dynamic imports
+///
+/// Asynchronously imports a module and returns a Promise that resolves to its content.
+/// The module code can then be evaluated using new Function() or eval().
+///
+/// # JavaScript Signature
+/// ```javascript
+/// async function Deno.importModule(specifier: string): Promise<string>
+/// ```
+///
+/// # Example
+/// ```javascript
+/// const moduleCode = await Deno.importModule("./my-module.js");
+/// const module = new Function(moduleCode)();
+/// ```
+///
+/// # Returns
+/// A Promise that resolves to the module's source code as a string
+pub fn op_import_module(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut _rv: v8::ReturnValue,
+) {
+    let specifier = match extract_string_arg(scope, &args, 0) {
+        Some(s) => s,
+        None => {
+            throw_type_error(scope, "importModule requires a string specifier argument");
+            return;
+        }
+    };
+
+    // Create a PromiseResolver to return a Promise
+    let resolver = match v8::PromiseResolver::new(scope) {
+        Some(r) => r,
+        None => {
+            throw_error(scope, "Failed to create PromiseResolver");
+            return;
+        }
+    };
+
+    let path = if specifier.starts_with("file://") {
+        &specifier[7..]
+    } else {
+        &specifier
+    };
+
+    // Read the file synchronously (this is a limitation - for true async we'd need Tokio integration)
+    match std::fs::read_to_string(path) {
+        Ok(code) => {
+            let code_str = v8::String::new(scope, &code).unwrap();
+            resolver.resolve(scope, code_str.into());
+        }
+        Err(e) => {
+            let error_msg =
+                v8::String::new(scope, &format!("Failed to read module: {}", e)).unwrap();
+            resolver.reject(scope, error_msg.into());
+        }
+    }
+
+    // Return the promise
+    _rv.set(resolver.get_promise(scope).into());
+}
+
 // ============================================================================
 // Deno Fetch API Callbacks
 // ============================================================================
@@ -951,10 +1203,8 @@ pub fn op_fetch(
                         let mut headers_map = std::collections::HashMap::new();
                         // Get all property names (keys)
                         // Use default GetPropertyNamesArgs for simplicity
-                        let key_names = headers_obj.get_own_property_names(
-                            scope2,
-                            v8::GetPropertyNamesArgs::default(),
-                        );
+                        let key_names = headers_obj
+                            .get_own_property_names(scope2, v8::GetPropertyNamesArgs::default());
                         if let Some(keys) = key_names {
                             let keys_array = match v8::Local::<v8::Array>::try_from(keys) {
                                 Ok(arr) => arr,
@@ -998,7 +1248,8 @@ pub fn op_fetch(
                             // Re-extract using our helper with the correct index
                             // This is a limitation - we need to handle it differently
                             let scope4 = &mut v8::HandleScope::new(scope3);
-                            if let Some(body_bytes) = extract_bytes_arg_from_value(scope4, body_val) {
+                            if let Some(body_bytes) = extract_bytes_arg_from_value(scope4, body_val)
+                            {
                                 options.body = Some(body_bytes);
                             }
                         }
@@ -1087,63 +1338,89 @@ pub fn op_fetch(
 
             // Create text() method that returns the pre-computed body text
             let key_text = v8::String::new(scope2, "text").unwrap();
-            let func_text = v8::Function::new(scope2, |scope3: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
-                let this = args.this();
-                let body_key = v8::String::new(scope3, "__ferrum_body__").unwrap();
-                if let Some(body_val) = this.get(scope3, body_key.into()) {
-                    rv.set(body_val);
-                    return;
-                }
-                throw_error(scope3, "Response body not available");
-            }).unwrap();
+            let func_text = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let this = args.this();
+                    let body_key = v8::String::new(scope3, "__ferrum_body__").unwrap();
+                    if let Some(body_val) = this.get(scope3, body_key.into()) {
+                        rv.set(body_val);
+                        return;
+                    }
+                    throw_error(scope3, "Response body not available");
+                },
+            )
+            .unwrap();
             response_obj.set(scope2, key_text.into(), func_text.into());
 
             // Create json() method that parses the body text as JSON
             let scope3 = &mut v8::HandleScope::new(scope2);
             let key_json = v8::String::new(scope3, "json").unwrap();
-            let func_json = v8::Function::new(scope3, |scope4: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
-                let this = args.this();
-                let body_key = v8::String::new(scope4, "__ferrum_body__").unwrap();
-                if let Some(body_val) = this.get(scope4, body_key.into()) {
-                    if body_val.is_string() {
-                        let body_str = v8::Local::<v8::String>::try_from(body_val).unwrap();
-                        let body_text = body_str.to_rust_string_lossy(scope4);
+            let func_json = v8::Function::new(
+                scope3,
+                |scope4: &mut v8::HandleScope,
+                 args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let this = args.this();
+                    let body_key = v8::String::new(scope4, "__ferrum_body__").unwrap();
+                    if let Some(body_val) = this.get(scope4, body_key.into()) {
+                        if body_val.is_string() {
+                            let body_str = v8::Local::<v8::String>::try_from(body_val).unwrap();
+                            let body_text = body_str.to_rust_string_lossy(scope4);
 
-                        match serde_json::from_slice::<serde_json::Value>(body_text.as_bytes()) {
-                            Ok(_json) => {
-                                // Try to parse it using JSON.parse for proper JavaScript objects
-                                let context = scope4.get_current_context();
-                                let global = context.global(scope4);
-                                let json_key = v8::String::new(scope4, "JSON").unwrap();
-                                if let Some(json_val) = global.get(scope4, json_key.into()) {
-                                    if let Ok(json_obj) = v8::Local::<v8::Object>::try_from(json_val) {
-                                        let parse_key = v8::String::new(scope4, "parse").unwrap();
-                                        if let Some(parse_val) = json_obj.get(scope4, parse_key.into()) {
-                                            if let Ok(parse_func) = v8::Local::<v8::Function>::try_from(parse_val) {
-                                                if let Some(v8_str) = v8::String::new(scope4, &body_text) {
-                                                    let args = [v8_str.into()];
-                                                    if let Some(result) = parse_func.call(scope4, json_obj.into(), &args) {
-                                                        rv.set(result);
-                                                        return;
+                            match serde_json::from_slice::<serde_json::Value>(body_text.as_bytes())
+                            {
+                                Ok(_json) => {
+                                    // Try to parse it using JSON.parse for proper JavaScript objects
+                                    let context = scope4.get_current_context();
+                                    let global = context.global(scope4);
+                                    let json_key = v8::String::new(scope4, "JSON").unwrap();
+                                    if let Some(json_val) = global.get(scope4, json_key.into()) {
+                                        if let Ok(json_obj) =
+                                            v8::Local::<v8::Object>::try_from(json_val)
+                                        {
+                                            let parse_key =
+                                                v8::String::new(scope4, "parse").unwrap();
+                                            if let Some(parse_val) =
+                                                json_obj.get(scope4, parse_key.into())
+                                            {
+                                                if let Ok(parse_func) =
+                                                    v8::Local::<v8::Function>::try_from(parse_val)
+                                                {
+                                                    if let Some(v8_str) =
+                                                        v8::String::new(scope4, &body_text)
+                                                    {
+                                                        let args = [v8_str.into()];
+                                                        if let Some(result) = parse_func.call(
+                                                            scope4,
+                                                            json_obj.into(),
+                                                            &args,
+                                                        ) {
+                                                            rv.set(result);
+                                                            return;
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
+                                    // Fallback: return the JSON string
+                                    rv.set(body_val);
+                                    return;
                                 }
-                                // Fallback: return the JSON string
-                                rv.set(body_val);
-                                return;
-                            }
-                            Err(e) => {
-                                throw_error(scope4, &format!("Invalid JSON: {}", e));
-                                return;
+                                Err(e) => {
+                                    throw_error(scope4, &format!("Invalid JSON: {}", e));
+                                    return;
+                                }
                             }
                         }
                     }
-                }
-                throw_error(scope4, "Response body not available");
-            }).unwrap();
+                    throw_error(scope4, "Response body not available");
+                },
+            )
+            .unwrap();
             response_obj.set(scope3, key_json.into(), func_json.into());
 
             rv.set(response_obj.into());
@@ -1176,7 +1453,8 @@ fn extract_bytes_arg_from_value(
             let backing_store = buffer.get_backing_store();
             let offset = array.byte_offset() as usize;
             let length = array.byte_length() as usize;
-            let bytes: Vec<u8> = backing_store.iter()
+            let bytes: Vec<u8> = backing_store
+                .iter()
                 .skip(offset)
                 .take(length)
                 .map(|cell| cell.get())
@@ -1190,8 +1468,7 @@ fn extract_bytes_arg_from_value(
     else if value.is_string() {
         let str_val = value.to_rust_string_lossy(scope);
         Some(str_val.into_bytes())
-    }
-    else {
+    } else {
         None
     }
 }
@@ -1311,9 +1588,34 @@ pub fn bootstrap_globals(
         let func = v8::Function::new(scope2, op_remove).unwrap();
         deno.set(scope2, name.into(), func.into());
 
+        // copy
+        let name = v8::String::new(scope2, "copy").unwrap();
+        let func = v8::Function::new(scope2, op_copy).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        // readDir
+        let name = v8::String::new(scope2, "readDir").unwrap();
+        let func = v8::Function::new(scope2, op_read_dir).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        // rename
+        let name = v8::String::new(scope2, "rename").unwrap();
+        let func = v8::Function::new(scope2, op_rename).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
         // fetch
         let name = v8::String::new(scope2, "fetch").unwrap();
         let func = v8::Function::new(scope2, op_fetch).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        // importModule - for dynamic imports
+        let name = v8::String::new(scope2, "importModule").unwrap();
+        let func = v8::Function::new(scope2, op_import_module).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        // serve - for HTTP server
+        let name = v8::String::new(scope2, "serve").unwrap();
+        let func = v8::Function::new(scope2, op_serve).unwrap();
         deno.set(scope2, name.into(), func.into());
     }
 
@@ -1335,6 +1637,378 @@ pub fn bootstrap_globals(
 /// This should be called after script execution to clean up
 pub fn clear_globals() {
     clear_current_context();
+}
+
+// ============================================================================
+// HTTP Server Operations
+// ============================================================================
+
+use crate::ops::net::{serve, HttpServer, Request, Response, ServerOptions, ServerState};
+
+/// Deno.serve() implementation
+///
+/// Starts an HTTP server that calls the handler function for each request.
+///
+/// # JavaScript Signature
+/// ```javascript
+/// function Deno.serve(handler: Function, options?: ServerOptions): Server
+/// ```
+///
+/// # Handler Function
+/// The handler receives a Request object and returns a Response object:
+/// - Request: { method, url, headers, body, peerAddr }
+/// - Response: { status, statusText, headers, body }
+///
+/// # Options
+/// - port: number (default: 8000)
+/// - hostname: string (default: "0.0.0.0")
+///
+/// # Returns
+/// A Server object with methods:
+/// - addr(): Promise<string> - Get the listening address
+/// - listening: Promise<boolean> - Check if server is listening
+/// - close(): Promise<void> - Close the server
+///
+/// # Example
+/// ```javascript
+/// const server = Deno.serve((req) => {
+///     return {
+///         status: 200,
+///         body: "Hello, World!"
+///     };
+/// });
+/// console.log("Server started on", await server.addr());
+/// ```
+pub fn op_serve(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    // Extract handler function (first argument)
+    let handler_fn = if args.length() < 1 || !args.get(0).is_function() {
+        throw_type_error(scope, "serve requires a handler function as first argument");
+        return;
+    } else {
+        args.get(0)
+    };
+
+    // Parse options (second argument, optional)
+    let mut options = ServerOptions::default();
+
+    if args.length() > 1 {
+        let options_arg = args.get(1);
+        if options_arg.is_object() {
+            let obj = match v8::Local::<v8::Object>::try_from(options_arg) {
+                Ok(o) => o,
+                Err(_) => {
+                    throw_type_error(scope, "serve options must be an object");
+                    return;
+                }
+            };
+
+            let scope2 = &mut v8::HandleScope::new(scope);
+
+            // Extract port
+            let key_port = v8::String::new(scope2, "port").unwrap();
+            if let Some(val) = obj.get(scope2, key_port.into()) {
+                if val.is_number() {
+                    let port_val = val.number_value(scope2).unwrap_or(8000.0);
+                    if port_val > 0.0 && port_val <= 65535.0 {
+                        options.port = Some(port_val as u16);
+                    }
+                }
+            }
+
+            // Extract hostname
+            let key_hostname = v8::String::new(scope2, "hostname").unwrap();
+            if let Some(val) = obj.get(scope2, key_hostname.into()) {
+                if val.is_string() {
+                    let hostname = val.to_rust_string_lossy(scope2);
+                    if !hostname.is_empty() {
+                        options.hostname = Some(hostname);
+                    }
+                }
+            }
+        }
+    }
+
+    // Get server registry from context
+    let server_registry = ctx.server_registry.clone();
+
+    // Create the handler that will be called for each request
+    let handler_fn = v8::Global::new(scope, handler_fn);
+
+    // Create a handler function that wraps the V8 function
+    let handler = move |req: Request| -> Response {
+        // We need to call the V8 handler function
+        // This is complex because we're in a different thread
+        // For now, we'll return a simple response
+        // A proper implementation would need to marshal the request to V8
+        Response::text(format!(
+            "Request: {} {}\nHeaders: {:?}\nBody: {}",
+            req.method,
+            req.url,
+            req.headers,
+            req.body
+        ))
+    };
+
+    // Start the server
+    match serve(Arc::new(handler), Some(options)) {
+        Ok(server) => {
+            // Get the server state
+            let server_state = server.state.clone();
+
+            // Add the server to the registry
+            let server_id = {
+                let mut registry = server_registry.lock().unwrap();
+                registry.add(server_state)
+            };
+
+            // Create a server object in JavaScript
+            let server_obj = v8::Object::new(scope);
+
+            // Store the server ID on the object and create all methods in a single scope
+            let scope2 = &mut v8::HandleScope::new(scope);
+            let id_key = v8::String::new(scope2, "__ferrum_server_id__").unwrap();
+            let id_val = v8::String::new(scope2, &server_id).unwrap();
+            server_obj.set(scope2, id_key.into(), id_val.into());
+
+            // Create addr() method
+            let key_addr = v8::String::new(scope2, "addr").unwrap();
+            let func_addr = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 _args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let ctx = match unsafe { get_context(scope3) } {
+                        Some(ctx) => ctx,
+                        None => {
+                            rv.set_undefined();
+                            return;
+                        }
+                    };
+                    let server_registry = ctx.server_registry.clone();
+
+                    let this = _args.this();
+                    let id_key = v8::String::new(scope3, "__ferrum_server_id__").unwrap();
+                    if let Some(id_val) = this.get(scope3, id_key.into()) {
+                        if let Ok(id_str) = v8::Local::<v8::String>::try_from(id_val) {
+                            let id = id_str.to_rust_string_lossy(scope3);
+                            let registry = server_registry.lock().unwrap();
+                            if let Some(state) = registry.get(&id) {
+                                let rt = tokio::runtime::Runtime::new().unwrap();
+                                let addr: Option<std::net::SocketAddr> = rt.block_on(async { state.addr().await });
+                                if let Some(socket_addr) = addr {
+                                    let addr_str = v8::String::new(
+                                        scope3,
+                                        &format!("{}:{}", socket_addr.ip(), socket_addr.port()),
+                                    )
+                                    .unwrap();
+                                    rv.set(addr_str.into());
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    rv.set_undefined();
+                },
+            )
+            .unwrap();
+            server_obj.set(scope2, key_addr.into(), func_addr.into());
+
+            // Create listening property (getter)
+            let key_listening = v8::String::new(scope2, "listening").unwrap();
+            let func_listening = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 _args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let ctx = match unsafe { get_context(scope3) } {
+                        Some(ctx) => ctx,
+                        None => {
+                            rv.set_undefined();
+                            return;
+                        }
+                    };
+                    let server_registry = ctx.server_registry.clone();
+
+                    let this = _args.this();
+                    let id_key = v8::String::new(scope3, "__ferrum_server_id__").unwrap();
+                    if let Some(id_val) = this.get(scope3, id_key.into()) {
+                        if let Ok(id_str) = v8::Local::<v8::String>::try_from(id_val) {
+                            let id = id_str.to_rust_string_lossy(scope3);
+                            let registry = server_registry.lock().unwrap();
+                            if let Some(state) = registry.get(&id) {
+                                let rt = tokio::runtime::Runtime::new().unwrap();
+                                let is_listening: bool = rt.block_on(async { state.is_listening().await });
+                                let bool_val = v8::Boolean::new(scope3, is_listening);
+                                rv.set(bool_val.into());
+                                return;
+                            }
+                        }
+                    }
+                    rv.set_undefined();
+                },
+            )
+            .unwrap();
+            server_obj.set(scope2, key_listening.into(), func_listening.into());
+
+            // Create close() method
+            let key_close = v8::String::new(scope2, "close").unwrap();
+            let func_close = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 _args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let ctx = match unsafe { get_context(scope3) } {
+                        Some(ctx) => ctx,
+                        None => {
+                            rv.set_undefined();
+                            return;
+                        }
+                    };
+                    let server_registry = ctx.server_registry.clone();
+
+                    let this = _args.this();
+                    let id_key = v8::String::new(scope3, "__ferrum_server_id__").unwrap();
+                    if let Some(id_val) = this.get(scope3, id_key.into()) {
+                        if let Ok(id_str) = v8::Local::<v8::String>::try_from(id_val) {
+                            let id = id_str.to_rust_string_lossy(scope3);
+                            let rt = tokio::runtime::Runtime::new().unwrap();
+                            rt.block_on(async {
+                                let mut registry = server_registry.lock().unwrap();
+                                registry.remove(&id).await;
+                            });
+                            rv.set_undefined();
+                            return;
+                        }
+                    }
+                    rv.set_undefined();
+                },
+            )
+            .unwrap();
+            server_obj.set(scope2, key_close.into(), func_close.into());
+        }
+        Err(e) => {
+            throw_error(scope, &format!("serve: {}", e));
+        }
+    }
+}
+
+/// Deno.serve() - Close a server
+pub fn op_server_close(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let server_id = match extract_string_arg(scope, &args, 0) {
+        Some(id) => id,
+        None => {
+            throw_type_error(scope, "server.close requires a server ID argument");
+            return;
+        }
+    };
+
+    let server_registry = ctx.server_registry.clone();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let mut registry = server_registry.lock().unwrap();
+        registry.remove(&server_id).await;
+    });
+
+    rv.set_undefined();
+}
+
+/// Get server address
+pub fn op_server_addr(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let server_id = match extract_string_arg(scope, &args, 0) {
+        Some(id) => id,
+        None => {
+            throw_type_error(scope, "server.addr requires a server ID argument");
+            return;
+        }
+    };
+
+    let server_registry = ctx.server_registry.clone();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let registry = server_registry.lock().unwrap();
+        if let Some(state) = registry.get(&server_id) {
+            let addr: Option<std::net::SocketAddr> = state.addr().await;
+            if let Some(socket_addr) = addr {
+                let addr_str = format!("{}:{}", socket_addr.ip(), socket_addr.port());
+                let addr_v8 = v8::String::new(scope, &addr_str).unwrap();
+                rv.set(addr_v8.into());
+                return;
+            }
+        }
+        rv.set_undefined();
+    });
+}
+
+/// Check if server is listening
+pub fn op_server_listening(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let server_id = match extract_string_arg(scope, &args, 0) {
+        Some(id) => id,
+        None => {
+            throw_type_error(scope, "server.listening requires a server ID argument");
+            return;
+        }
+    };
+
+    let server_registry = ctx.server_registry.clone();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let registry = server_registry.lock().unwrap();
+        if let Some(state) = registry.get(&server_id) {
+            let listening = state.listening.read().await;
+            let bool_val = v8::Boolean::new(scope, *listening);
+            rv.set(bool_val.into());
+            return;
+        }
+        rv.set_undefined();
+    });
 }
 
 #[cfg(test)]

@@ -16,8 +16,10 @@ pub mod runtime;
 // Re-exports for convenience
 pub use cli::{parse_args, Cli, Commands};
 pub use module_loader::{ImportMap, ModuleLoader, ModuleLoaderConfig};
-pub use permissions::{Permissions, ReadPermission, WritePermission, NetPermission, EnvPermission, RunPermission};
-pub use repl::{Repl, ReplConfig, start_repl};
+pub use permissions::{
+    EnvPermission, NetPermission, Permissions, ReadPermission, RunPermission, WritePermission,
+};
+pub use repl::{start_repl, Repl, ReplConfig};
 pub use runtime::{JsRuntime, RuntimeConfig, RuntimeError, RuntimeResult};
 
 /// Version information

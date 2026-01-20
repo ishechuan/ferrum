@@ -3,9 +3,9 @@
 //! This module provides an interactive JavaScript shell for experimentation
 //! and quick testing.
 
+use std::cell::RefCell;
 use std::io::{self, Write};
 use std::rc::Rc;
-use std::cell::RefCell;
 
 use crate::permissions::Permissions;
 use crate::runtime::{JsRuntime, RuntimeConfig, RuntimeError};
@@ -144,7 +144,8 @@ impl Repl {
         };
 
         print!("{}", prompt);
-        io::stdout().flush()
+        io::stdout()
+            .flush()
             .map_err(|e| ReplError::Input(format!("Failed to flush stdout: {}", e)))?;
 
         let mut input = String::new();

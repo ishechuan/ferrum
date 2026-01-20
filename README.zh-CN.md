@@ -8,11 +8,11 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 ## 状态
 
-**版本：** 0.1.0 (Alpha)
+**版本：** 0.2.0 (Alpha)
 **第一阶段：** ✅ 100% 完成
-**第二阶段：** 40% 完成（已添加异步/Promise 支持！）
+**第二阶段：** 90% 完成（HTTP 服务器已实现！）
 
-这是一个早期阶段的项目，第一阶段核心功能已完全实现。第二阶段（Web API）现已添加完整的 async/await 和 Promise 支持，完成度达到 40%。
+这是一个早期阶段的项目，第一阶段核心功能已完全实现。第二阶段（Web API）现已实现 HTTP 服务器支持，完成度达到 90%。
 
 ## 特性
 
@@ -24,8 +24,8 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 ### 标准库
 - **文件系统 API**：读取、写入、复制、重命名、目录操作（全部支持异步！）
-- **网络操作**：DNS 解析、HTTP fetch（开发中）
-- **定时器 API**：setTimeout、Deno.sleep、Promise 支持
+- **网络操作**：DNS 解析、HTTP fetch（GET、POST、headers、timeout）、HTTP 服务器 (Deno.serve)
+- **定时器 API**：setTimeout、setInterval、Deno.sleep、Promise 支持
 - **路径工具**：跨平台路径操作
 
 ### 开发体验
@@ -107,7 +107,48 @@ console.log(ips);
 
 运行：
 ```bash
-ferrum run --allow-net dns.js
+ ferrum run --allow-net dns.js
+ ```
+
+### 动态导入
+```javascript
+// main.js
+// 使用 Deno.importModule() 在运行时加载模块（返回 Promise）
+const moduleCode = await Deno.importModule("./utils.js");
+const utils = new Function(moduleCode)();
+console.log(utils.add(2, 3)); // 5
+```
+
+```javascript
+// utils.js
+const add = (a, b) => a + b;
+const subtract = (a, b) => a - b;
+"return { add, subtract }";
+```
+
+运行：
+```bash
+ferrum run --allow-read main.js
+```
+
+### HTTP 服务器
+```javascript
+// server.js
+// 使用 Deno.serve() 启动 HTTP 服务器
+const server = Deno.serve((req) => {
+    return {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+        body: "Hello from Ferrum HTTP Server!\n"
+    };
+}, { port: 8080, hostname: "0.0.0.0" });
+
+console.log("服务器启动在", await server.addr());
+```
+
+运行：
+```bash
+ferrum run --allow-net server.js
 ```
 
 ## 权限系统
@@ -204,16 +245,13 @@ ferrum/
 这是一个 Alpha 版本，以下功能**尚未实现**：
 
 ### 网络
-- **HTTP/HTTPS fetch** - API 结构已存在，需要集成 HTTP 客户端（reqwest/hyper）
-- **WebSocket** - 已设计但未实现
-- **TCP 连接** - 已设计但未实现
-
-### 模块加载
+- **WebSocket** - 已设计，待实现
+- **TCP 连接** - 已设计，待实现
 - **ES 模块导入** - 模块加载器支持 `.mjs` 文件，但动态导入（`import()`）尚未实现
 - **模块解析回调** - 基础实现已就绪，需要增强以支持复杂的导入图
 
 ### 定时器
-- **setInterval** - 定时器基础设施可用，但 callback 执行需要正确的 `FnMut` 处理
+- **setInterval** - 已实现完整的 FnMut 回调处理
 
 ### TypeScript
 - **TypeScript 支持** - 计划在第四阶段
@@ -237,14 +275,16 @@ ferrum/
 - [x] V8-Rust 桥接
 - [x] 导入映射支持
 
-### 第二阶段：Web API - 50% 完成
-- [x] Fetch API (HTTP 客户端) - 已实现完整的异步支持
+### 第二阶段：Web API - 90% 完成
+- [x] Native Ops 桥接 - V8-Rust 桥接，支持从 JavaScript 调用 Rust
+- [x] Fetch API (HTTP 客户端) - 完整的异步 HTTP/HTTPS 支持，包含 headers、timeout、POST
 - [x] 异步/await 桥接 - V8 Promise 与 Tokio 事件循环集成
-- [x] 异步文件操作 - Deno.readTextFile、writeTextFile 等现在返回 Promise
+- [x] 异步文件操作 - Deno.readTextFile、writeTextFile、copy、readDir、rename 返回 Promise
+- [x] 动态导入 - Deno.importModule() 返回 Promise 用于异步模块加载
+- [x] HTTP 服务器 - Deno.serve() 用于构建 HTTP 服务器
 - [ ] WebSocket - 已设计，待实现
 - [ ] 文本编码/解码
 - [ ] URL/URLSearchParams
-- [ ] HTTP 服务器
 
 ### 第三阶段：开发工具 - 30% 完成
 - [x] 测试运行器 CLI - 需要 JavaScript 集成
@@ -277,12 +317,10 @@ ferrum/
 
 ### 优先领域
 
-1. **HTTP 客户端集成** - Fetch API 已实现，测试和完善中
-2. **WebSocket 支持** - 实现 WebSocket 客户端 API
-3. **setInterval 修复** - 正确的 FnMut callback 处理
-4. **动态导入** - 实现 `import()` 以支持动态模块加载
-5. **模块解析** - 增强模块解析以支持复杂的导入图
-6. **测试** - 为异步操作添加更多集成测试
+1. **WebSocket 支持** - 实现 WebSocket 客户端 API
+2. **文本编码** - 实现 TextEncoder/TextDecoder API
+3. **URL/URLSearchParams** - 实现 URL API 以支持 Web 兼容性
+4. **测试** - 为异步操作添加更多集成测试
 
 指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)（即将推出）。
 

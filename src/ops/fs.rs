@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use crate::permissions::{Permissions, PermissionError};
+use crate::permissions::{PermissionError, Permissions};
 
 /// Errors that can occur during file system operations
 #[derive(Error, Debug)]
@@ -162,9 +162,21 @@ pub fn metadata(path: &str, permissions: &Permissions) -> FsResult<FileMetadata>
         is_directory: metadata.is_dir(),
         is_symlink: metadata.is_symlink(),
         size: metadata.len(),
-        modified: metadata.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
-        accessed: metadata.accessed().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
-        created: metadata.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()),
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()),
+        accessed: metadata
+            .accessed()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()),
+        created: metadata
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs()),
         readonly: metadata.permissions().readonly(),
     })
 }
@@ -619,10 +631,7 @@ fn convert_notify_event(event: notify::Event) -> FileWatcherEvent {
         // For rename events, notify provides both old and new paths
         EventKind::Any | EventKind::Other => {
             if event.paths.len() >= 2 {
-                FileWatcherEvent::Rename(
-                    event.paths[0].clone(),
-                    event.paths[1].clone(),
-                )
+                FileWatcherEvent::Rename(event.paths[0].clone(), event.paths[1].clone())
             } else {
                 FileWatcherEvent::Modify(event.paths.get(0).cloned().unwrap_or_default())
             }
@@ -724,7 +733,11 @@ mod tests {
     #[test]
     fn test_create_dir_recursive() {
         let temp_dir = TempDir::new().unwrap();
-        let dir_path = temp_dir.path().join("parent").join("child").join("grandchild");
+        let dir_path = temp_dir
+            .path()
+            .join("parent")
+            .join("child")
+            .join("grandchild");
         let path_str = dir_path.to_str().unwrap();
 
         create_dir(path_str, &test_perms(), true).unwrap();
@@ -743,12 +756,14 @@ mod tests {
             &dir_path.join("file1.txt").to_str().unwrap(),
             "test1",
             &test_perms(),
-        ).unwrap();
+        )
+        .unwrap();
         write_text_file(
             &dir_path.join("file2.txt").to_str().unwrap(),
             "test2",
             &test_perms(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let entries = read_dir(dir_str, &test_perms()).unwrap();
         assert_eq!(entries.len(), 2);
@@ -761,7 +776,12 @@ mod tests {
         let new_path = temp_dir.path().join("new.txt");
 
         write_text_file(old_path.to_str().unwrap(), "test", &test_perms()).unwrap();
-        rename(old_path.to_str().unwrap(), new_path.to_str().unwrap(), &test_perms()).unwrap();
+        rename(
+            old_path.to_str().unwrap(),
+            new_path.to_str().unwrap(),
+            &test_perms(),
+        )
+        .unwrap();
 
         assert!(!exists(old_path.to_str().unwrap(), &test_perms()).unwrap());
         assert!(exists(new_path.to_str().unwrap(), &test_perms()).unwrap());
@@ -774,7 +794,12 @@ mod tests {
         let dst_path = temp_dir.path().join("dst.txt");
 
         write_text_file(src_path.to_str().unwrap(), "test", &test_perms()).unwrap();
-        let bytes = copy(src_path.to_str().unwrap(), dst_path.to_str().unwrap(), &test_perms()).unwrap();
+        let bytes = copy(
+            src_path.to_str().unwrap(),
+            dst_path.to_str().unwrap(),
+            &test_perms(),
+        )
+        .unwrap();
 
         assert_eq!(bytes, 4);
         assert!(exists(dst_path.to_str().unwrap(), &test_perms()).unwrap());
@@ -872,7 +897,8 @@ mod tests {
                 let _ = tx_clone.send(event);
             },
             FileWatcherConfig::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Give the watcher a moment to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -881,10 +907,7 @@ mod tests {
         fs::write(&file_path, "test content").unwrap();
 
         // Wait for event
-        let event = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            rx.recv(),
-        ).await;
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv()).await;
 
         assert!(event.is_ok());
         let received = event.unwrap();
@@ -911,7 +934,8 @@ mod tests {
                 let _ = tx_clone.send(event);
             },
             FileWatcherConfig::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Give the watcher a moment to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -920,18 +944,16 @@ mod tests {
         fs::write(&file_path, "modified content").unwrap();
 
         // Wait for event (skip any initial create events)
-        let event = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            async {
-                loop {
-                    if let Some(e) = rx.recv().await {
-                        if matches!(e, FileWatcherEvent::Modify(_)) {
-                            return e;
-                        }
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(e) = rx.recv().await {
+                    if matches!(e, FileWatcherEvent::Modify(_)) {
+                        return e;
                     }
                 }
-            },
-        ).await;
+            }
+        })
+        .await;
 
         assert!(event.is_ok());
         assert!(matches!(event.unwrap(), FileWatcherEvent::Modify(_)));
@@ -956,7 +978,8 @@ mod tests {
                 let _ = tx_clone.send(event);
             },
             FileWatcherConfig::default(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Give the watcher a moment to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -965,18 +988,16 @@ mod tests {
         fs::remove_file(&file_path).unwrap();
 
         // Wait for remove event
-        let event = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            async {
-                loop {
-                    if let Some(e) = rx.recv().await {
-                        if matches!(e, FileWatcherEvent::Remove(_)) {
-                            return e;
-                        }
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(e) = rx.recv().await {
+                    if matches!(e, FileWatcherEvent::Remove(_)) {
+                        return e;
                     }
                 }
-            },
-        ).await;
+            }
+        })
+        .await;
 
         assert!(event.is_ok());
         assert!(matches!(event.unwrap(), FileWatcherEvent::Remove(_)));
@@ -1029,7 +1050,8 @@ mod tests {
                 recursive: true,
                 debounce_ms: Some(200), // 200ms debounce
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         // Give the watcher a moment to start
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -1046,6 +1068,10 @@ mod tests {
         // With debouncing, we should receive fewer events than writes
         // (exact count depends on timing, but should be less than 5)
         let count = event_count.load(std::sync::atomic::Ordering::SeqCst);
-        assert!(count < 5, "Expected fewer events with debouncing, got {}", count);
+        assert!(
+            count < 5,
+            "Expected fewer events with debouncing, got {}",
+            count
+        );
     }
 }

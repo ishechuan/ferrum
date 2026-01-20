@@ -10,6 +10,7 @@ use v8;
 
 use crate::ops::async_ops::{create_promise, OpFuture, OpId, OpResult, OpState, PromiseRegistry};
 use crate::ops::fs;
+use crate::ops::op_import_module;
 use crate::permissions::Permissions;
 
 thread_local! {
@@ -319,7 +320,10 @@ fn extract_bytes_arg_v2(
     if arg.is_array_buffer() {
         let buffer = v8::Local::<v8::ArrayBuffer>::try_from(arg).ok()?;
         let backing_store = buffer.get_backing_store();
-        let bytes: Vec<u8> = backing_store.iter().map(|cell: &Cell<u8>| cell.get()).collect();
+        let bytes: Vec<u8> = backing_store
+            .iter()
+            .map(|cell: &Cell<u8>| cell.get())
+            .collect();
         Some(bytes)
     } else if arg.is_uint8_array() {
         let array = v8::Local::<v8::Uint8Array>::try_from(arg).ok()?;
@@ -584,6 +588,169 @@ pub fn op_async_remove(
     rv.set(promise.into());
 }
 
+pub fn op_async_copy(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let (op_state, promise_registry, permissions_arc) = match get_async_state() {
+        Some(state) => state,
+        None => {
+            throw_error(scope, "Async runtime context not initialized");
+            return;
+        }
+    };
+
+    let src = match extract_string_arg(scope, &args, 0) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "copy requires a string source path argument");
+            return;
+        }
+    };
+
+    let dest = match extract_string_arg(scope, &args, 1) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "copy requires a string destination path argument");
+            return;
+        }
+    };
+
+    let (promise, resolver) = match create_promise(scope) {
+        Some(p) => p,
+        None => {
+            throw_error(scope, "Failed to create Promise");
+            return;
+        }
+    };
+
+    let permissions = permissions_arc.lock().unwrap().clone();
+    let global_resolver = v8::Global::new(scope, resolver);
+
+    let future: OpFuture = Box::pin(async move {
+        if let Err(e) = permissions.check_write(&dest) {
+            return OpResult::Err(format!("Permission denied: {}", e));
+        }
+        if let Err(e) = permissions.check_read(&src) {
+            return OpResult::Err(format!("Permission denied: {}", e));
+        }
+        match fs::copy(&src, &dest, &permissions) {
+            Ok(bytes) => OpResult::OkNumber(bytes as f64),
+            Err(e) => OpResult::Err(format!("copy: {}", e)),
+        }
+    });
+
+    schedule_async_op(&op_state, &promise_registry, global_resolver, future);
+    rv.set(promise.into());
+}
+
+pub fn op_async_read_dir(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let (op_state, promise_registry, permissions_arc) = match get_async_state() {
+        Some(state) => state,
+        None => {
+            throw_error(scope, "Async runtime context not initialized");
+            return;
+        }
+    };
+
+    let path = match extract_string_arg(scope, &args, 0) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "readDir requires a string path argument");
+            return;
+        }
+    };
+
+    let (promise, resolver) = match create_promise(scope) {
+        Some(p) => p,
+        None => {
+            throw_error(scope, "Failed to create Promise");
+            return;
+        }
+    };
+
+    let permissions = permissions_arc.lock().unwrap().clone();
+    let global_resolver = v8::Global::new(scope, resolver);
+
+    let future: OpFuture = Box::pin(async move {
+        if let Err(e) = permissions.check_read(&path) {
+            return OpResult::Err(format!("Permission denied: {}", e));
+        }
+        match fs::read_dir(&path, &permissions) {
+            Ok(entries) => {
+                let json = serde_json::json!(entries);
+                OpResult::OkJson(json.to_string())
+            }
+            Err(e) => OpResult::Err(format!("readDir: {}", e)),
+        }
+    });
+
+    schedule_async_op(&op_state, &promise_registry, global_resolver, future);
+    rv.set(promise.into());
+}
+
+pub fn op_async_rename(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let (op_state, promise_registry, permissions_arc) = match get_async_state() {
+        Some(state) => state,
+        None => {
+            throw_error(scope, "Async runtime context not initialized");
+            return;
+        }
+    };
+
+    let old_path = match extract_string_arg(scope, &args, 0) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "rename requires a string oldPath argument");
+            return;
+        }
+    };
+
+    let new_path = match extract_string_arg(scope, &args, 1) {
+        Some(p) => p,
+        None => {
+            throw_type_error(scope, "rename requires a string newPath argument");
+            return;
+        }
+    };
+
+    let (promise, resolver) = match create_promise(scope) {
+        Some(p) => p,
+        None => {
+            throw_error(scope, "Failed to create Promise");
+            return;
+        }
+    };
+
+    let permissions = permissions_arc.lock().unwrap().clone();
+    let global_resolver = v8::Global::new(scope, resolver);
+
+    let future: OpFuture = Box::pin(async move {
+        if let Err(e) = permissions.check_write(&old_path) {
+            return OpResult::Err(format!("Permission denied: {}", e));
+        }
+        if let Err(e) = permissions.check_write(&new_path) {
+            return OpResult::Err(format!("Permission denied: {}", e));
+        }
+        match fs::rename(&old_path, &new_path, &permissions) {
+            Ok(_) => OpResult::Ok("undefined".to_string()),
+            Err(e) => OpResult::Err(format!("rename: {}", e)),
+        }
+    });
+
+    schedule_async_op(&op_state, &promise_registry, global_resolver, future);
+    rv.set(promise.into());
+}
+
 pub fn op_async_sleep(
     scope: &mut v8::HandleScope,
     args: v8::FunctionCallbackArguments,
@@ -700,8 +867,24 @@ pub fn bootstrap_async_globals(
         let func = v8::Function::new(scope2, op_async_remove).unwrap();
         deno.set(scope2, name.into(), func.into());
 
+        let name = v8::String::new(scope2, "copy").unwrap();
+        let func = v8::Function::new(scope2, op_async_copy).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        let name = v8::String::new(scope2, "readDir").unwrap();
+        let func = v8::Function::new(scope2, op_async_read_dir).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        let name = v8::String::new(scope2, "rename").unwrap();
+        let func = v8::Function::new(scope2, op_async_rename).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
         let name = v8::String::new(scope2, "sleep").unwrap();
         let func = v8::Function::new(scope2, op_async_sleep).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        let name = v8::String::new(scope2, "importModule").unwrap();
+        let func = v8::Function::new(scope2, op_import_module).unwrap();
         deno.set(scope2, name.into(), func.into());
     }
 
@@ -779,7 +962,11 @@ mod tests {
         let promise_registry = Arc::new(std::sync::Mutex::new(PromiseRegistry::new()));
         let permissions = Arc::new(std::sync::Mutex::new(Permissions::allow_all()));
 
-        set_async_context(op_state.clone(), promise_registry.clone(), permissions.clone());
+        set_async_context(
+            op_state.clone(),
+            promise_registry.clone(),
+            permissions.clone(),
+        );
 
         assert!(get_async_state().is_some());
 

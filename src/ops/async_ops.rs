@@ -232,7 +232,8 @@ impl EventLoop {
                                 let global = context.global(scope);
                                 let json_key = v8::String::new(scope, "JSON").unwrap();
                                 if let Some(json_val) = global.get(scope, json_key.into()) {
-                                    if let Ok(json_obj) = v8::Local::<v8::Object>::try_from(json_val)
+                                    if let Ok(json_obj) =
+                                        v8::Local::<v8::Object>::try_from(json_val)
                                     {
                                         let parse_key = v8::String::new(scope, "parse").unwrap();
                                         if let Some(parse_val) =
@@ -352,7 +353,10 @@ impl EventLoop {
 
 pub fn create_promise<'s>(
     scope: &mut v8::HandleScope<'s>,
-) -> Option<(v8::Local<'s, v8::Promise>, v8::Local<'s, v8::PromiseResolver>)> {
+) -> Option<(
+    v8::Local<'s, v8::Promise>,
+    v8::Local<'s, v8::PromiseResolver>,
+)> {
     let resolver = v8::PromiseResolver::new(scope)?;
     let promise = resolver.get_promise(scope);
     Some((promise, resolver))

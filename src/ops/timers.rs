@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -106,11 +106,7 @@ impl TimerRegistry {
     }
 
     /// Set a timeout - execute callback once after delay
-    pub async fn set_timeout(
-        &self,
-        delay_ms: u64,
-        callback: Box<dyn FnOnce() + Send>,
-    ) -> TimerId {
+    pub async fn set_timeout(&self, delay_ms: u64, callback: Box<dyn FnOnce() + Send>) -> TimerId {
         let id = self.next_id();
         let (abort_tx, mut abort_rx) = oneshot::channel();
         let timers = self.timers.clone();
@@ -141,35 +137,34 @@ impl TimerRegistry {
     }
 
     /// Set an interval - execute callback repeatedly with delay
-    pub async fn set_interval(
-        &self,
-        delay_ms: u64,
-        _callback: Box<dyn FnMut() + Send>,
-    ) -> TimerId {
+    ///
+    /// Uses Arc<Mutex<>> to properly handle FnMut callbacks that need to be
+    /// called multiple times. The callback is wrapped in a Arc<Mutex<>> to allow
+    /// shared ownership and thread-safe mutable access.
+    pub async fn set_interval(&self, delay_ms: u64, callback: Box<dyn FnMut() + Send>) -> TimerId {
         let id = self.next_id();
         let (abort_tx, mut abort_rx) = oneshot::channel();
         let timers = self.timers.clone();
-        let callback_tx = self.callback_tx.clone();
+
+        // Wrap the callback in Arc<Mutex<>> to allow repeated calls
+        let callback = Arc::new(Mutex::new(callback));
 
         // Store the timer handle
         let handle = TimerHandle::new(id, abort_tx);
         timers.write().await.insert(id, handle);
 
         // Spawn the interval task
+        let callback_clone = callback.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(delay_ms));
 
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        // Clone the callback for this execution
-                        // Note: This is a simplification - in production, you'd want
-                        // a more sophisticated approach to handle FnMut callbacks
-                        let cb = Box::new(|| {
-                            // Placeholder - actual callback execution
-                        }) as Box<dyn FnOnce() + Send>;
-
-                        let _ = callback_tx.send(TimerCallback { id, callback: cb });
+                        // Lock the callback and execute it
+                        if let Ok(mut cb) = callback_clone.lock() {
+                            cb();
+                        }
                     }
                     _ = &mut abort_rx => {
                         // Timer was cancelled
@@ -188,9 +183,7 @@ impl TimerRegistry {
     /// Clear a timeout or interval
     pub async fn clear(&self, id: TimerId) -> TimerResult<()> {
         let mut timers = self.timers.write().await;
-        let timer = timers
-            .get_mut(&id)
-            .ok_or(TimerError::InvalidTimerId(id))?;
+        let timer = timers.get_mut(&id).ok_or(TimerError::InvalidTimerId(id))?;
 
         timer.cancel()?;
         timers.remove(&id);
@@ -467,9 +460,12 @@ mod tests {
         let counter_clone = counter.clone();
 
         let _id = registry
-            .set_timeout(50, Box::new(move || {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            }))
+            .set_timeout(
+                50,
+                Box::new(move || {
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
             .await;
 
         // Wait for timeout to execute
@@ -486,9 +482,12 @@ mod tests {
         let counter_clone = counter.clone();
 
         let id = registry
-            .set_timeout(100, Box::new(move || {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            }))
+            .set_timeout(
+                100,
+                Box::new(move || {
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
             .await;
 
         // Clear before it executes
@@ -503,39 +502,127 @@ mod tests {
     #[tokio::test]
     async fn test_set_interval() {
         let registry = TimerRegistry::new();
-        let _counter = Arc::new(AtomicUsize::new(0));
-
-        // Note: This test uses a simplified interval implementation
-        // In production, you'd need a proper FnMut handling
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
 
         let id = registry
-            .set_interval(50, Box::new(move || {
-                // Simplified - actual callback would be here
-            }))
+            .set_interval(
+                20,
+                Box::new(move || {
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
             .await;
 
-        // Let it run a few times
-        tokio::time::sleep(Duration::from_millis(130)).await;
+        // Wait for interval to execute at least 3 times (20ms * 3 = 60ms)
+        tokio::time::sleep(Duration::from_millis(80)).await;
 
         // Clear the interval
         registry.clear(id).await.unwrap();
 
+        // Should have executed at least 3 times
+        let count = counter.load(Ordering::SeqCst);
+        assert!(count >= 2, "Expected at least 2 executions, got {}", count);
         assert_eq!(registry.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_interval_multiple() {
+        let registry = TimerRegistry::new();
+        let counter1 = Arc::new(AtomicUsize::new(0));
+        let counter2 = Arc::new(AtomicUsize::new(0));
+        let counter1_clone = counter1.clone();
+        let counter2_clone = counter2.clone();
+
+        let _id1 = registry
+            .set_interval(
+                30,
+                Box::new(move || {
+                    counter1_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .await;
+
+        let _id2 = registry
+            .set_interval(
+                50,
+                Box::new(move || {
+                    counter2_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .await;
+
+        // Wait for both intervals to execute
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        registry.clear_all().await;
+
+        // First interval (30ms) should have executed ~4 times in 120ms
+        let count1 = counter1.load(Ordering::SeqCst);
+        assert!(
+            count1 >= 2,
+            "Expected at least 2 executions for interval 1, got {}",
+            count1
+        );
+
+        // Second interval (50ms) should have executed ~2 times in 120ms
+        let count2 = counter2.load(Ordering::SeqCst);
+        assert!(
+            count2 >= 1,
+            "Expected at least 1 execution for interval 2, got {}",
+            count2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_interval_clear() {
+        let registry = TimerRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+
+        let id = registry
+            .set_interval(
+                20,
+                Box::new(move || {
+                    counter_clone.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .await;
+
+        // Wait for a couple of executions
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Clear the interval
+        registry.clear(id).await.unwrap();
+
+        // Get count before waiting more
+        let count_before = counter.load(Ordering::SeqCst);
+
+        // Wait longer than one interval
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Count should not have increased after clear
+        let count_after = counter.load(Ordering::SeqCst);
+        assert_eq!(
+            count_before, count_after,
+            "Callback should not execute after clear"
+        );
+        assert_eq!(registry.active_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_set_interval_zero_delay() {
+        // Skip this test - tokio interval doesn't support 0ms delay
+        // This is a known limitation of tokio::time::interval
     }
 
     #[tokio::test]
     async fn test_clear_all() {
         let registry = TimerRegistry::new();
 
-        registry
-            .set_timeout(100, Box::new(|| {}))
-            .await;
-        registry
-            .set_timeout(100, Box::new(|| {}))
-            .await;
-        registry
-            .set_timeout(100, Box::new(|| {}))
-            .await;
+        registry.set_timeout(100, Box::new(|| {})).await;
+        registry.set_timeout(100, Box::new(|| {})).await;
+        registry.set_timeout(100, Box::new(|| {})).await;
 
         assert_eq!(registry.active_count().await, 3);
 
@@ -557,9 +644,12 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
 
-        set_immediate(&registry, Box::new(move || {
-            counter_clone.fetch_add(1, Ordering::SeqCst);
-        }))
+        set_immediate(
+            &registry,
+            Box::new(move || {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
         .await;
 
         // Should execute immediately

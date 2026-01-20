@@ -273,7 +273,7 @@ pub enum Commands {
 
         /// Show JSON output
         #[arg(long)]
-    json: bool,
+        json: bool,
     },
 
     /// Type check TypeScript code
@@ -596,14 +596,8 @@ mod tests {
 
     #[test]
     fn test_parse_bundle_command() {
-        let cli = parse_args_from(strs(&[
-            "ferrum",
-            "bundle",
-            "input.ts",
-            "-o",
-            "output.js",
-        ]))
-        .unwrap();
+        let cli =
+            parse_args_from(strs(&["ferrum", "bundle", "input.ts", "-o", "output.js"])).unwrap();
 
         assert!(matches!(cli.command, Commands::Bundle { .. }));
     }
@@ -617,8 +611,14 @@ mod tests {
 
     #[test]
     fn test_parse_log_level() {
-        let cli = parse_args_from(strs(&["ferrum", "--log-level", "debug", "run", "script.js"]))
-            .unwrap();
+        let cli = parse_args_from(strs(&[
+            "ferrum",
+            "--log-level",
+            "debug",
+            "run",
+            "script.js",
+        ]))
+        .unwrap();
 
         assert_eq!(cli.log_level, "debug");
     }
