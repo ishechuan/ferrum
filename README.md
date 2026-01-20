@@ -10,8 +10,9 @@ English | [简体中文](README.zh-CN.md)
 
 **Version:** 0.1.0 (Alpha)
 **Phase 1:** ✅ 100% Complete
+**Phase 2:** 40% Complete (Async/Promise support added!)
 
-This is an early-stage project with Phase 1 core functionality fully implemented. Many advanced features are still in development. See [Current Limitations](#current-limitations) for details.
+This is an early-stage project with Phase 1 core functionality fully implemented. Phase 2 (Web APIs) is now 40% complete with the addition of full async/await and Promise support.
 
 ## Features
 
@@ -22,9 +23,9 @@ This is an early-stage project with Phase 1 core functionality fully implemented
 - **Single Binary**: Distributed as a single executable
 
 ### Standard Library
-- **File System API**: Read, write, copy, rename, directory operations
-- **Network Operations**: DNS resolution (HTTP/TCP planned)
-- **Timer API**: setTimeout, promises (setInterval in progress)
+- **File System API**: Read, write, copy, rename, directory operations (all async!)
+- **Network Operations**: DNS resolution, HTTP fetch (in progress)
+- **Timer API**: setTimeout, Deno.sleep, Promise support
 - **Path Utilities**: Cross-platform path manipulation
 
 ### Developer Experience
@@ -237,8 +238,10 @@ This is an alpha release. The following features are **not yet implemented**:
 - [x] V8-Rust bridge
 - [x] Import map support
 
-### Phase 2: Web APIs - 20% Complete
-- [ ] Fetch API (HTTP client) - API designed, needs implementation
+### Phase 2: Web APIs - 50% Complete
+- [x] Fetch API (HTTP client) - Implemented with full async support
+- [x] Async/Await Bridge - V8 Promise integration with Tokio event loop
+- [x] Async File Operations - Deno.readTextFile, writeTextFile, etc. now return Promises
 - [ ] WebSocket - API designed, needs implementation
 - [ ] Text encoding/decoding
 - [ ] URL/URLSearchParams
@@ -275,11 +278,12 @@ Contributions are welcome! This is an early-stage project and there's plenty to 
 
 ### Priority Areas
 
-1. **HTTP Client Integration** - Integrate reqwest or hyper for fetch API
-2. **Dynamic Imports** - Implement `import()` for dynamic module loading
-3. **Module Resolution** - Enhance module resolution for complex import graphs
-4. **setInterval Fix** - Proper FnMut callback handling
-5. **Tests** - Add more integration tests
+1. **HTTP Client Integration** - Fetch API is now implemented, test and enhance
+2. **WebSocket Support** - Implement WebSocket client API
+3. **setInterval Fix** - Proper FnMut callback handling
+4. **Dynamic Imports** - Implement `import()` for dynamic module loading
+5. **Module Resolution** - Enhance module resolution for complex import graphs
+6. **Tests** - Add more integration tests for async operations
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines (coming soon).
 

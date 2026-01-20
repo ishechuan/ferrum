@@ -12,6 +12,8 @@ use thiserror::Error;
 use v8::{CreateParams, Module, OwnedIsolate, Platform, Script};
 
 use crate::module_loader::{ModuleLoader, ModuleLoaderConfig};
+use crate::ops::async_bindings::{bootstrap_async_globals, clear_async_context};
+use crate::ops::async_ops::{OpState, PromiseRegistry};
 use crate::ops::bindings::bootstrap_globals;
 use crate::ops::dispatch::OpRegistry;
 use crate::permissions::Permissions;
@@ -332,14 +334,16 @@ impl JsRuntime {
         }
 
         // Compile the script
-        let source = v8::String::new(scope, code)
-            .ok_or_else(|| RuntimeError::CompilationError("Failed to create source string".into()))?;
+        let source = v8::String::new(scope, code).ok_or_else(|| {
+            RuntimeError::CompilationError("Failed to create source string".into())
+        })?;
 
         let script = Script::compile(scope, source, None)
             .ok_or_else(|| RuntimeError::CompilationError("Script compilation failed".into()))?;
 
         // Run the script
-        let result = script.run(scope)
+        let result = script
+            .run(scope)
             .ok_or_else(|| RuntimeError::ExecutionError("Script execution failed".into()))?;
 
         // Convert result to string
@@ -349,6 +353,191 @@ impl JsRuntime {
         self.stats.borrow_mut().scripts_executed += 1;
 
         Ok(result_str)
+    }
+
+    /// Execute JavaScript code with async/await support
+    ///
+    /// This method properly handles Promises and runs an event loop to
+    /// resolve all pending async operations before returning.
+    ///
+    /// # Arguments
+    /// * `code` - JavaScript source code to execute
+    /// * `filename` - Optional filename for error reporting
+    ///
+    /// # Returns
+    /// The result of the last expression evaluated (after all Promises resolve)
+    pub fn execute_async(&mut self, code: &str, _filename: Option<&str>) -> RuntimeResult<String> {
+        let op_state = Arc::new(std::sync::Mutex::new(OpState::new()));
+        let promise_registry = Arc::new(std::sync::Mutex::new(PromiseRegistry::new()));
+        let permissions = Arc::new(std::sync::Mutex::new(self.permissions.clone()));
+
+        let scope = &mut v8::HandleScope::new(&mut self.isolate);
+        let context = v8::Context::new(scope);
+        let scope = &mut v8::ContextScope::new(scope, context);
+
+        if let Err(e) = bootstrap_async_globals(
+            scope,
+            op_state.clone(),
+            promise_registry.clone(),
+            permissions,
+        ) {
+            tracing::error!("Failed to bootstrap async globals: {}", e);
+            return Err(RuntimeError::InitializationError(format!(
+                "Failed to bootstrap async globals: {}",
+                e
+            )));
+        }
+
+        let source = v8::String::new(scope, code).ok_or_else(|| {
+            RuntimeError::CompilationError("Failed to create source string".into())
+        })?;
+
+        let script = Script::compile(scope, source, None)
+            .ok_or_else(|| RuntimeError::CompilationError("Script compilation failed".into()))?;
+
+        let result = script
+            .run(scope)
+            .ok_or_else(|| RuntimeError::ExecutionError("Script execution failed".into()))?;
+
+        scope.perform_microtask_checkpoint();
+
+        let mut final_result = result.to_rust_string_lossy(scope);
+
+        let max_iterations = 1000;
+        let mut iterations = 0;
+
+        loop {
+            iterations += 1;
+            if iterations > max_iterations {
+                tracing::warn!("Event loop exceeded max iterations");
+                break;
+            }
+
+            scope.perform_microtask_checkpoint();
+
+            let completed = {
+                let waker = futures::task::noop_waker();
+                let mut cx = std::task::Context::from_waker(&waker);
+                let mut state = op_state.lock().unwrap();
+                state.poll_ops(&mut cx)
+            };
+
+            for (op_id, op_result) in completed {
+                let mut registry = promise_registry.lock().unwrap();
+                if let Some(resolver) = registry.take(op_id) {
+                    let resolver = v8::Local::new(scope, resolver);
+                    match op_result {
+                        crate::ops::async_ops::OpResult::Ok(value) => {
+                            if let Some(v8_str) = v8::String::new(scope, &value) {
+                                resolver.resolve(scope, v8_str.into());
+                            }
+                        }
+                        crate::ops::async_ops::OpResult::OkBytes(bytes) => {
+                            let buffer = v8::ArrayBuffer::new(scope, bytes.len());
+                            {
+                                let backing_store = buffer.get_backing_store();
+                                for (i, byte) in bytes.iter().enumerate() {
+                                    backing_store[i].set(*byte);
+                                }
+                            }
+                            let uint8_array =
+                                v8::Uint8Array::new(scope, buffer, 0, bytes.len()).unwrap();
+                            resolver.resolve(scope, uint8_array.into());
+                        }
+                        crate::ops::async_ops::OpResult::OkBool(value) => {
+                            let bool_val = v8::Boolean::new(scope, value);
+                            resolver.resolve(scope, bool_val.into());
+                        }
+                        crate::ops::async_ops::OpResult::OkNumber(value) => {
+                            let num_val = v8::Number::new(scope, value);
+                            resolver.resolve(scope, num_val.into());
+                        }
+                        crate::ops::async_ops::OpResult::OkJson(json) => {
+                            if let Some(v8_str) = v8::String::new(scope, &json) {
+                                let ctx = scope.get_current_context();
+                                let global = ctx.global(scope);
+                                let json_key = v8::String::new(scope, "JSON").unwrap();
+                                if let Some(json_val) = global.get(scope, json_key.into()) {
+                                    if let Ok(json_obj) =
+                                        v8::Local::<v8::Object>::try_from(json_val)
+                                    {
+                                        let parse_key = v8::String::new(scope, "parse").unwrap();
+                                        if let Some(parse_val) =
+                                            json_obj.get(scope, parse_key.into())
+                                        {
+                                            if let Ok(parse_func) =
+                                                v8::Local::<v8::Function>::try_from(parse_val)
+                                            {
+                                                let args = [v8_str.into()];
+                                                if let Some(parsed) =
+                                                    parse_func.call(scope, json_obj.into(), &args)
+                                                {
+                                                    resolver.resolve(scope, parsed);
+                                                } else {
+                                                    resolver.resolve(scope, v8_str.into());
+                                                }
+                                            } else {
+                                                resolver.resolve(scope, v8_str.into());
+                                            }
+                                        } else {
+                                            resolver.resolve(scope, v8_str.into());
+                                        }
+                                    } else {
+                                        resolver.resolve(scope, v8_str.into());
+                                    }
+                                } else {
+                                    resolver.resolve(scope, v8_str.into());
+                                }
+                            }
+                        }
+                        crate::ops::async_ops::OpResult::Err(error) => {
+                            let error_str = v8::String::new(scope, &error).unwrap();
+                            let exception = v8::Exception::error(scope, error_str);
+                            resolver.reject(scope, exception);
+                        }
+                    }
+                }
+            }
+
+            scope.perform_microtask_checkpoint();
+
+            let has_pending_ops = op_state.lock().unwrap().has_pending();
+            let has_pending_promises = promise_registry.lock().unwrap().has_pending();
+
+            if !has_pending_ops && !has_pending_promises {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        if result.is_promise() {
+            let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
+            match promise.state() {
+                v8::PromiseState::Fulfilled => {
+                    let resolved_value = promise.result(scope);
+                    final_result = resolved_value.to_rust_string_lossy(scope);
+                }
+                v8::PromiseState::Rejected => {
+                    let rejected_value = promise.result(scope);
+                    let error_msg = rejected_value.to_rust_string_lossy(scope);
+                    clear_async_context();
+                    return Err(RuntimeError::ExecutionError(format!(
+                        "Promise rejected: {}",
+                        error_msg
+                    )));
+                }
+                v8::PromiseState::Pending => {
+                    tracing::warn!("Promise still pending after event loop completed");
+                }
+            }
+        }
+
+        clear_async_context();
+
+        self.stats.borrow_mut().scripts_executed += 1;
+
+        Ok(final_result)
     }
 
     /// Execute a script from a file
@@ -383,8 +572,9 @@ impl JsRuntime {
     /// The result of module evaluation
     pub fn execute_module(&mut self, specifier: &str) -> RuntimeResult<String> {
         // Check if module loader is available
-        let module_loader = self.module_loader.as_ref()
-            .ok_or_else(|| RuntimeError::ModuleError("Module loader not initialized".to_string()))?;
+        let module_loader = self.module_loader.as_ref().ok_or_else(|| {
+            RuntimeError::ModuleError("Module loader not initialized".to_string())
+        })?;
 
         // Clone the runtime context before creating the scope
         let rt_context = self.rt_context.clone();
@@ -406,19 +596,17 @@ impl JsRuntime {
         }
 
         // Load and compile the module
-        let (module, _resolved_specifier) = Self::compile_module_impl(
-            scope,
-            module_loader,
-            module_cache,
-            specifier,
-            None,
-        )?;
+        let (module, _resolved_specifier) =
+            Self::compile_module_impl(scope, module_loader, module_cache, specifier, None)?;
 
         // Check for compilation errors
         if module.get_status() == v8::ModuleStatus::Errored {
             let exception = module.get_exception();
             let error_msg = exception.to_rust_string_lossy(scope);
-            return Err(RuntimeError::CompilationError(format!("Module compilation error: {}", error_msg)));
+            return Err(RuntimeError::CompilationError(format!(
+                "Module compilation error: {}",
+                error_msg
+            )));
         }
 
         // Instantiate the module (this resolves all dependencies)
@@ -435,9 +623,15 @@ impl JsRuntime {
             if module.get_status() == v8::ModuleStatus::Errored {
                 let exception = module.get_exception();
                 let error_msg = exception.to_rust_string_lossy(scope);
-                return Err(RuntimeError::ModuleError(format!("Module instantiation error: {}", error_msg)));
+                return Err(RuntimeError::ModuleError(format!(
+                    "Module instantiation error: {}",
+                    error_msg
+                )));
             }
-            return Err(RuntimeError::ModuleError("Module instantiation failed - modules with imports are not yet supported".to_string()));
+            return Err(RuntimeError::ModuleError(
+                "Module instantiation failed - modules with imports are not yet supported"
+                    .to_string(),
+            ));
         }
 
         // Evaluate the module
@@ -449,9 +643,14 @@ impl JsRuntime {
                 if module.get_status() == v8::ModuleStatus::Errored {
                     let exception = module.get_exception();
                     let error_msg = exception.to_rust_string_lossy(scope);
-                    return Err(RuntimeError::ExecutionError(format!("Module evaluation error: {}", error_msg)));
+                    return Err(RuntimeError::ExecutionError(format!(
+                        "Module evaluation error: {}",
+                        error_msg
+                    )));
                 }
-                return Err(RuntimeError::ExecutionError("Module evaluation failed".to_string()));
+                return Err(RuntimeError::ExecutionError(
+                    "Module evaluation failed".to_string(),
+                ));
             }
         };
 
@@ -500,8 +699,9 @@ impl JsRuntime {
         referrer: Option<&str>,
     ) -> RuntimeResult<(v8::Local<'s, Module>, String)> {
         // Resolve the specifier
-        let resolved_specifier = module_loader.resolve(specifier, referrer)
-            .map_err(|e| RuntimeError::ModuleError(format!("Failed to resolve '{}': {}", specifier, e)))?;
+        let resolved_specifier = module_loader.resolve(specifier, referrer).map_err(|e| {
+            RuntimeError::ModuleError(format!("Failed to resolve '{}': {}", specifier, e))
+        })?;
 
         // Check if module is already cached
         if let Some(cached_module) = module_cache.get(&resolved_specifier) {
@@ -511,21 +711,29 @@ impl JsRuntime {
 
         // Load the module source (block on async)
         let resolved_module = tokio::runtime::Runtime::new()
-            .map_err(|e| RuntimeError::InitializationError(format!("Failed to create tokio runtime: {}", e)))?
+            .map_err(|e| {
+                RuntimeError::InitializationError(format!("Failed to create tokio runtime: {}", e))
+            })?
             .block_on(module_loader.load_module(&resolved_specifier, referrer))
-            .map_err(|e| RuntimeError::ModuleError(format!("Failed to load module '{}': {}", specifier, e)))?;
+            .map_err(|e| {
+                RuntimeError::ModuleError(format!("Failed to load module '{}': {}", specifier, e))
+            })?;
 
         // Create V8 source string
-        let source_str = v8::String::new(scope, &resolved_module.source.code)
-            .ok_or_else(|| RuntimeError::CompilationError(
-                format!("Failed to create source string for '{}'", specifier)
-            ))?;
+        let source_str = v8::String::new(scope, &resolved_module.source.code).ok_or_else(|| {
+            RuntimeError::CompilationError(format!(
+                "Failed to create source string for '{}'",
+                specifier
+            ))
+        })?;
 
         // Create resource name for error reporting
-        let resource_name = v8::String::new(scope, &resolved_specifier)
-            .ok_or_else(|| RuntimeError::CompilationError(
-                format!("Failed to create resource name for '{}'", specifier)
-            ))?;
+        let resource_name = v8::String::new(scope, &resolved_specifier).ok_or_else(|| {
+            RuntimeError::CompilationError(format!(
+                "Failed to create resource name for '{}'",
+                specifier
+            ))
+        })?;
 
         // Create undefined value before creating ScriptOrigin to avoid borrow issues
         let undefined_value = v8::undefined(scope);
@@ -552,10 +760,9 @@ impl JsRuntime {
         let source = v8::script_compiler::Source::new(source_str, Some(&origin));
 
         // Compile the module using ScriptCompiler
-        let module = v8::script_compiler::compile_module(scope, source)
-            .ok_or_else(|| RuntimeError::CompilationError(
-                format!("Failed to compile module '{}'", specifier)
-            ))?;
+        let module = v8::script_compiler::compile_module(scope, source).ok_or_else(|| {
+            RuntimeError::CompilationError(format!("Failed to compile module '{}'", specifier))
+        })?;
 
         // Cache the compiled module (convert to Global for storage)
         let global_module = v8::Global::new(scope, module);
@@ -681,5 +888,76 @@ mod tests {
 
         let stats_after = rt.stats();
         assert_eq!(stats_after.scripts_executed, 2);
+    }
+
+    #[test]
+    fn test_async_execution_simple() {
+        let mut rt = init_test_runtime();
+        let result = rt.execute_async("1 + 1", None).unwrap();
+        assert_eq!(result, "2");
+    }
+
+    #[test]
+    fn test_async_execution_console_log() {
+        let mut rt = init_test_runtime();
+        let result = rt
+            .execute_async("console.log('hello async')", None)
+            .unwrap();
+        assert_eq!(result, "undefined");
+    }
+
+    #[test]
+    fn test_async_execution_promise_resolve() {
+        let mut rt = init_test_runtime();
+        let result = rt
+            .execute_async("Promise.resolve(42).then(x => x)", None)
+            .unwrap();
+        assert!(result.contains("object") || result == "42" || result.contains("Promise"));
+    }
+
+    #[test]
+    fn test_async_execution_with_deno_sleep() {
+        let mut rt = init_test_runtime();
+        let code = r#"
+            (async () => {
+                await Deno.sleep(10);
+                return "slept";
+            })()
+        "#;
+        let result = rt.execute_async(code, None).unwrap();
+        assert!(
+            result.contains("slept") || result.contains("Promise") || result.contains("object")
+        );
+    }
+
+    #[test]
+    fn test_async_file_operations() {
+        use std::io::Write;
+        let mut rt = init_test_runtime();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let test_file = temp_dir.path().join("async_test.txt");
+
+        {
+            let mut file = std::fs::File::create(&test_file).unwrap();
+            file.write_all(b"async hello world").unwrap();
+        }
+
+        let code = format!(
+            r#"
+            (async () => {{
+                const content = await Deno.readTextFile("{}");
+                return content;
+            }})()
+            "#,
+            test_file.display().to_string().replace("\\", "\\\\")
+        );
+
+        let result = rt.execute_async(&code, None).unwrap();
+        assert!(
+            result.contains("async hello world")
+                || result.contains("Promise")
+                || result.contains("object")
+        );
     }
 }

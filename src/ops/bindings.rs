@@ -23,6 +23,7 @@ use std::sync::Arc;
 use v8;
 
 use crate::ops::fs;
+use crate::ops::net;
 use crate::runtime::RuntimeContext;
 
 // Thread-local storage for the current runtime context
@@ -850,6 +851,352 @@ pub fn op_remove(
 }
 
 // ============================================================================
+// Deno Fetch API Callbacks
+// ============================================================================
+
+/// Deno.fetch() implementation
+///
+/// Fetches a URL using HTTP and returns the response.
+///
+/// # JavaScript Signature
+/// ```javascript
+/// async function Deno.fetch(url: string, options?: FetchOptions): Promise<FetchResponse>
+/// ```
+///
+/// # Options
+/// - method: HTTP method string (GET, POST, etc.)
+/// - headers: Object with string key-value pairs
+/// - body: String or Uint8Array for request body
+/// - timeout: Timeout in milliseconds
+///
+/// # Returns
+///
+/// An object with properties:
+/// - ok: boolean (true for 2xx status codes)
+/// - status: number (HTTP status code)
+/// - statusText: string (HTTP status text)
+/// - headers: object (response headers)
+/// - url: string (final URL after redirects)
+/// - text(): function - returns body as text
+/// - json(): function - returns body as JSON
+///
+/// # Example
+/// ```javascript
+/// const response = await Deno.fetch("https://example.com");
+/// console.log(response.status, response.statusText);
+/// const text = await response.text();
+/// ```
+///
+/// # Errors
+///
+/// Throws if:
+/// - URL argument is missing or not a string
+/// - Permission is denied
+/// - Network request fails
+/// - Response cannot be read
+pub fn op_fetch(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    // Extract URL argument
+    let url = match extract_string_arg(scope, &args, 0) {
+        Some(u) => u,
+        None => {
+            throw_type_error(scope, "fetch requires a string URL argument");
+            return;
+        }
+    };
+
+    // Parse options from second argument if provided
+    let mut options = net::FetchOptions::default();
+
+    if args.length() > 1 {
+        let options_arg = args.get(1);
+        if options_arg.is_object() {
+            let obj = match v8::Local::<v8::Object>::try_from(options_arg) {
+                Ok(o) => o,
+                Err(_) => {
+                    throw_type_error(scope, "fetch options must be an object");
+                    return;
+                }
+            };
+
+            let scope2 = &mut v8::HandleScope::new(scope);
+
+            // Extract method
+            let key_method = v8::String::new(scope2, "method").unwrap();
+            if let Some(val) = obj.get(scope2, key_method.into()) {
+                if val.is_string() {
+                    let method_str = val.to_rust_string_lossy(scope2);
+                    if let Some(method) = net::HttpMethod::from_str(&method_str) {
+                        options.method = Some(method);
+                    }
+                }
+            }
+
+            // Extract headers
+            let key_headers = v8::String::new(scope2, "headers").unwrap();
+            if let Some(val) = obj.get(scope2, key_headers.into()) {
+                if val.is_object() {
+                    if let Ok(headers_obj) = v8::Local::<v8::Object>::try_from(val) {
+                        let mut headers_map = std::collections::HashMap::new();
+                        // Get all property names (keys)
+                        // Use default GetPropertyNamesArgs for simplicity
+                        let key_names = headers_obj.get_own_property_names(
+                            scope2,
+                            v8::GetPropertyNamesArgs::default(),
+                        );
+                        if let Some(keys) = key_names {
+                            let keys_array = match v8::Local::<v8::Array>::try_from(keys) {
+                                Ok(arr) => arr,
+                                Err(_) => {
+                                    throw_type_error(scope2, "failed to extract headers keys");
+                                    return;
+                                }
+                            };
+
+                            for i in 0..keys_array.length() {
+                                let key_val = keys_array.get_index(scope2, i);
+                                if let Some(key) = key_val {
+                                    let key_str = key.to_rust_string_lossy(scope2);
+                                    let value = headers_obj.get(scope2, key);
+                                    if let Some(value_val) = value {
+                                        let value_str = value_val.to_rust_string_lossy(scope2);
+                                        headers_map.insert(key_str, value_str);
+                                    }
+                                }
+                            }
+                        }
+                        if !headers_map.is_empty() {
+                            options.headers = Some(headers_map);
+                        }
+                    }
+                }
+            }
+
+            // Extract body (string or bytes)
+            let key_body = v8::String::new(scope2, "body").unwrap();
+            if let Some(_val) = obj.get(scope2, key_body.into()) {
+                // Try to extract as bytes first
+                if let Some(_bytes) = extract_bytes_arg(scope2, &args, 1) {
+                    // We need to get the body property specifically
+                    let scope3 = &mut v8::HandleScope::new(scope2);
+                    let body_key = v8::String::new(scope3, "body").unwrap();
+                    if let Some(body_val) = obj.get(scope3, body_key.into()) {
+                        if body_val.is_string() {
+                            options.body = Some(body_val.to_rust_string_lossy(scope3).into_bytes());
+                        } else if body_val.is_uint8_array() || body_val.is_array_buffer() {
+                            // Re-extract using our helper with the correct index
+                            // This is a limitation - we need to handle it differently
+                            let scope4 = &mut v8::HandleScope::new(scope3);
+                            if let Some(body_bytes) = extract_bytes_arg_from_value(scope4, body_val) {
+                                options.body = Some(body_bytes);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Extract timeout
+            let key_timeout = v8::String::new(scope2, "timeout").unwrap();
+            if let Some(val) = obj.get(scope2, key_timeout.into()) {
+                if val.is_number() {
+                    let timeout_val = val.number_value(scope2).unwrap_or(0.0);
+                    if timeout_val > 0.0 {
+                        options.timeout = Some(timeout_val as u64);
+                    }
+                }
+            }
+
+            // Extract redirect option
+            let key_redirect = v8::String::new(scope2, "redirect").unwrap();
+            if let Some(val) = obj.get(scope2, key_redirect.into()) {
+                if val.is_boolean() {
+                    options.redirect = Some(val.boolean_value(scope2));
+                }
+            }
+
+            // Extract max_redirects option
+            let key_max_redirects = v8::String::new(scope2, "maxRedirects").unwrap();
+            if let Some(val) = obj.get(scope2, key_max_redirects.into()) {
+                if val.is_number() {
+                    let max_val = val.number_value(scope2).unwrap_or(0.0);
+                    if max_val > 0.0 {
+                        options.max_redirects = Some(max_val as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    let permissions = ctx.permissions.lock().unwrap();
+
+    match net::fetch(&url, Some(options), &permissions) {
+        Ok(response) => {
+            // Create a response object with all properties and methods
+            let response_obj = v8::Object::new(scope);
+
+            // Set ok
+            let key_ok = v8::String::new(scope, "ok").unwrap();
+            let val_ok = v8::Boolean::new(scope, response.ok());
+            response_obj.set(scope, key_ok.into(), val_ok.into());
+
+            // Set status
+            let key_status = v8::String::new(scope, "status").unwrap();
+            let val_status = v8::Number::new(scope, response.status as f64);
+            response_obj.set(scope, key_status.into(), val_status.into());
+
+            // Set statusText
+            let key_status_text = v8::String::new(scope, "statusText").unwrap();
+            let val_status_text = v8::String::new(scope, &response.status_text).unwrap();
+            response_obj.set(scope, key_status_text.into(), val_status_text.into());
+
+            // Set url
+            let key_url = v8::String::new(scope, "url").unwrap();
+            let val_url = v8::String::new(scope, &response.url).unwrap();
+            response_obj.set(scope, key_url.into(), val_url.into());
+
+            // Set headers object
+            let headers_obj = v8::Object::new(scope);
+            for (name, value) in &response.headers {
+                let key = v8::String::new(scope, name).unwrap();
+                let val = v8::String::new(scope, value).unwrap();
+                headers_obj.set(scope, key.into(), val.into());
+            }
+            let key_headers = v8::String::new(scope, "headers").unwrap();
+            response_obj.set(scope, key_headers.into(), headers_obj.into());
+
+            // For simplicity, pre-compute and store the body text on the response object
+            // This avoids the complexity of using symbols or closures with captured data
+            let body_text = String::from_utf8_lossy(&response.body).to_string();
+            let body_text_v8 = v8::String::new(scope, &body_text).unwrap();
+
+            // Store the body text as an internal property (using a special key name)
+            let scope2 = &mut v8::HandleScope::new(scope);
+            let body_key = v8::String::new(scope2, "__ferrum_body__").unwrap();
+            response_obj.set(scope2, body_key.into(), body_text_v8.into());
+
+            // Create text() method that returns the pre-computed body text
+            let key_text = v8::String::new(scope2, "text").unwrap();
+            let func_text = v8::Function::new(scope2, |scope3: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
+                let this = args.this();
+                let body_key = v8::String::new(scope3, "__ferrum_body__").unwrap();
+                if let Some(body_val) = this.get(scope3, body_key.into()) {
+                    rv.set(body_val);
+                    return;
+                }
+                throw_error(scope3, "Response body not available");
+            }).unwrap();
+            response_obj.set(scope2, key_text.into(), func_text.into());
+
+            // Create json() method that parses the body text as JSON
+            let scope3 = &mut v8::HandleScope::new(scope2);
+            let key_json = v8::String::new(scope3, "json").unwrap();
+            let func_json = v8::Function::new(scope3, |scope4: &mut v8::HandleScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
+                let this = args.this();
+                let body_key = v8::String::new(scope4, "__ferrum_body__").unwrap();
+                if let Some(body_val) = this.get(scope4, body_key.into()) {
+                    if body_val.is_string() {
+                        let body_str = v8::Local::<v8::String>::try_from(body_val).unwrap();
+                        let body_text = body_str.to_rust_string_lossy(scope4);
+
+                        match serde_json::from_slice::<serde_json::Value>(body_text.as_bytes()) {
+                            Ok(_json) => {
+                                // Try to parse it using JSON.parse for proper JavaScript objects
+                                let context = scope4.get_current_context();
+                                let global = context.global(scope4);
+                                let json_key = v8::String::new(scope4, "JSON").unwrap();
+                                if let Some(json_val) = global.get(scope4, json_key.into()) {
+                                    if let Ok(json_obj) = v8::Local::<v8::Object>::try_from(json_val) {
+                                        let parse_key = v8::String::new(scope4, "parse").unwrap();
+                                        if let Some(parse_val) = json_obj.get(scope4, parse_key.into()) {
+                                            if let Ok(parse_func) = v8::Local::<v8::Function>::try_from(parse_val) {
+                                                if let Some(v8_str) = v8::String::new(scope4, &body_text) {
+                                                    let args = [v8_str.into()];
+                                                    if let Some(result) = parse_func.call(scope4, json_obj.into(), &args) {
+                                                        rv.set(result);
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Fallback: return the JSON string
+                                rv.set(body_val);
+                                return;
+                            }
+                            Err(e) => {
+                                throw_error(scope4, &format!("Invalid JSON: {}", e));
+                                return;
+                            }
+                        }
+                    }
+                }
+                throw_error(scope4, "Response body not available");
+            }).unwrap();
+            response_obj.set(scope3, key_json.into(), func_json.into());
+
+            rv.set(response_obj.into());
+        }
+        Err(e) => {
+            throw_error(scope, &format!("fetch: {}", e));
+        }
+    }
+}
+
+/// Helper function to extract bytes from a V8 value
+/// This is similar to extract_bytes_arg but works with a specific value
+/// rather than pulling from arguments
+fn extract_bytes_arg_from_value(
+    scope: &mut v8::HandleScope,
+    value: v8::Local<v8::Value>,
+) -> Option<Vec<u8>> {
+    // Handle ArrayBuffer
+    if value.is_array_buffer() {
+        let buffer = v8::Local::<v8::ArrayBuffer>::try_from(value).ok()?;
+        let backing_store = buffer.get_backing_store();
+        let bytes: Vec<u8> = backing_store.iter().map(|cell| cell.get()).collect();
+        Some(bytes)
+    }
+    // Handle Uint8Array
+    else if value.is_uint8_array() {
+        let array = v8::Local::<v8::Uint8Array>::try_from(value).ok()?;
+        let scope2 = &mut v8::HandleScope::new(scope);
+        if let Some(buffer) = array.buffer(scope2) {
+            let backing_store = buffer.get_backing_store();
+            let offset = array.byte_offset() as usize;
+            let length = array.byte_length() as usize;
+            let bytes: Vec<u8> = backing_store.iter()
+                .skip(offset)
+                .take(length)
+                .map(|cell| cell.get())
+                .collect();
+            Some(bytes)
+        } else {
+            None
+        }
+    }
+    // Handle string
+    else if value.is_string() {
+        let str_val = value.to_rust_string_lossy(scope);
+        Some(str_val.into_bytes())
+    }
+    else {
+        None
+    }
+}
+
+// ============================================================================
 // Global Object Bootstrap
 // ============================================================================
 
@@ -962,6 +1309,11 @@ pub fn bootstrap_globals(
         // remove
         let name = v8::String::new(scope2, "remove").unwrap();
         let func = v8::Function::new(scope2, op_remove).unwrap();
+        deno.set(scope2, name.into(), func.into());
+
+        // fetch
+        let name = v8::String::new(scope2, "fetch").unwrap();
+        let func = v8::Function::new(scope2, op_fetch).unwrap();
         deno.set(scope2, name.into(), func.into());
     }
 

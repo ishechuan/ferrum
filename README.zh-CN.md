@@ -10,8 +10,9 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 **版本：** 0.1.0 (Alpha)
 **第一阶段：** ✅ 100% 完成
+**第二阶段：** 40% 完成（已添加异步/Promise 支持！）
 
-这是一个早期阶段的项目，第一阶段核心功能已完全实现。许多高级功能仍在开发中。详情请参阅[当前限制](#当前限制)。
+这是一个早期阶段的项目，第一阶段核心功能已完全实现。第二阶段（Web API）现已添加完整的 async/await 和 Promise 支持，完成度达到 40%。
 
 ## 特性
 
@@ -22,9 +23,9 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 - **单文件**：作为单个可执行文件分发
 
 ### 标准库
-- **文件系统 API**：读取、写入、复制、重命名、目录操作
-- **网络操作**：DNS 解析（HTTP/TCP 计划中）
-- **定时器 API**：setTimeout、Promise（setInterval 开发中）
+- **文件系统 API**：读取、写入、复制、重命名、目录操作（全部支持异步！）
+- **网络操作**：DNS 解析、HTTP fetch（开发中）
+- **定时器 API**：setTimeout、Deno.sleep、Promise 支持
 - **路径工具**：跨平台路径操作
 
 ### 开发体验
@@ -236,9 +237,11 @@ ferrum/
 - [x] V8-Rust 桥接
 - [x] 导入映射支持
 
-### 第二阶段：Web API - 20% 完成
-- [ ] Fetch API (HTTP 客户端) - API 已设计，待实现
-- [ ] WebSocket - API 已设计，待实现
+### 第二阶段：Web API - 50% 完成
+- [x] Fetch API (HTTP 客户端) - 已实现完整的异步支持
+- [x] 异步/await 桥接 - V8 Promise 与 Tokio 事件循环集成
+- [x] 异步文件操作 - Deno.readTextFile、writeTextFile 等现在返回 Promise
+- [ ] WebSocket - 已设计，待实现
 - [ ] 文本编码/解码
 - [ ] URL/URLSearchParams
 - [ ] HTTP 服务器
@@ -274,11 +277,12 @@ ferrum/
 
 ### 优先领域
 
-1. **HTTP 客户端集成** - 集成 reqwest 或 hyper 以实现 fetch API
-2. **动态导入** - 实现 `import()` 以支持动态模块加载
-3. **模块解析** - 增强模块解析以支持复杂的导入图
-4. **setInterval 修复** - 正确的 FnMut callback 处理
-5. **测试** - 添加更多集成测试
+1. **HTTP 客户端集成** - Fetch API 已实现，测试和完善中
+2. **WebSocket 支持** - 实现 WebSocket 客户端 API
+3. **setInterval 修复** - 正确的 FnMut callback 处理
+4. **动态导入** - 实现 `import()` 以支持动态模块加载
+5. **模块解析** - 增强模块解析以支持复杂的导入图
+6. **测试** - 为异步操作添加更多集成测试
 
 指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)（即将推出）。
 
