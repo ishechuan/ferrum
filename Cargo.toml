@@ -33,6 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Path utilities
 path-clean = "1.0"
 url = "2.5"
+urlencoding = "2.1"
 
 # HTTP client/server (for future web APIs)
 hyper = { version = "1.0", features = ["full"] }
@@ -49,6 +50,10 @@ regex = "1.10"
 # File system watching
 notify = "6.1"
 futures = "0.3.31"
+
+# WebSocket support
+tokio-tungstenite = "0.21"
+tungstenite = "0.21"
 
 [dev-dependencies]
 # Testing

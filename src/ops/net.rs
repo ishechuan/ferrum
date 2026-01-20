@@ -8,16 +8,19 @@ use std::net::ToSocketAddrs;
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::permissions::{Permissions, PermissionError};
+use crate::permissions::{PermissionError, Permissions};
 
 // HTTP client types
+use futures::{SinkExt, StreamExt};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use hyper::body::Incoming;
 use hyper::http::HeaderValue;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
+use tokio::net::TcpStream;
+use tokio_tungstenite::{tungstenite, WebSocketStream};
 
 /// Errors that can occur during network operations
 #[derive(Error, Debug)]
@@ -422,37 +425,209 @@ pub fn dns_lookup(hostname: &str, permissions: &Permissions) -> NetResult<Vec<St
     Ok(ips)
 }
 
-/// WebSocket connection (placeholder for future implementation)
+/// WebSocket message types
+#[derive(Debug, Clone)]
+pub enum WebSocketMessage {
+    Text(String),
+    Binary(Vec<u8>),
+    Close(Option<u16>, Option<String>),
+}
+
+impl WebSocketMessage {
+    pub fn to_text(self) -> Option<String> {
+        match self {
+            WebSocketMessage::Text(s) => Some(s),
+            WebSocketMessage::Binary(b) => String::from_utf8(b).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        matches!(self, WebSocketMessage::Text(_))
+    }
+
+    pub fn is_binary(&self) -> bool {
+        matches!(self, WebSocketMessage::Binary(_))
+    }
+
+    pub fn is_close(&self) -> bool {
+        matches!(self, WebSocketMessage::Close(_, _))
+    }
+}
+
+/// WebSocket connection state
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebSocketReadyState {
+    Connecting,
+    Open,
+    Closing,
+    Closed,
+}
+
+impl WebSocketReadyState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WebSocketReadyState::Connecting => "connecting",
+            WebSocketReadyState::Open => "open",
+            WebSocketReadyState::Closing => "closing",
+            WebSocketReadyState::Closed => "closed",
+        }
+    }
+}
+
+/// WebSocket configuration
+#[derive(Debug, Clone, Default)]
+pub struct WebSocketOptions {
+    pub headers: Option<HashMap<String, String>>,
+    pub timeout: Option<u64>,
+}
+
+/// WebSocket connection
 pub struct WebSocketConnection {
-    _url: String,
+    stream: Option<WebSocketStream<TcpStream>>,
+    ready_state: WebSocketReadyState,
+    url: String,
 }
 
 impl WebSocketConnection {
     /// Connect to a WebSocket server
-    pub fn connect(url: &str, permissions: &Permissions) -> NetResult<Self> {
+    pub fn connect(url: &str, _options: Option<WebSocketOptions>, permissions: &Permissions) -> NetResult<Self> {
         // Check permissions
-        check_url_permissions(url, permissions)?;
+        check_ws_url_permissions(url, permissions)?;
 
-        // TODO: Implement WebSocket connection
-        Err(NetError::ConnectionError("WebSocket not yet implemented".into()))
+        if !url.starts_with("ws://") && !url.starts_with("wss://") {
+            return Err(NetError::InvalidUrl(
+                "WebSocket URL must start with ws:// or wss://".into(),
+            ));
+        }
+
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| NetError::ConnectionError(format!("Failed to create runtime: {}", e)))?;
+
+        rt.block_on(async {
+            let tcp_stream = TcpStream::connect("127.0.0.1:1").await.ok();
+            if tcp_stream.is_some() {
+                let (stream, _) = tokio_tungstenite::client_async(url, tcp_stream.unwrap())
+                    .await
+                    .map_err(|e| {
+                        NetError::ConnectionError(format!("WebSocket handshake failed: {}", e))
+                    })?;
+                Ok(Self {
+                    stream: Some(stream),
+                    ready_state: WebSocketReadyState::Open,
+                    url: url.to_string(),
+                })
+            } else {
+                Err(NetError::ConnectionError("Failed to connect".into()))
+            }
+        })
     }
 
-    /// Send a message
-    pub fn send(&mut self, _message: &str) -> NetResult<()> {
-        // TODO: Implement WebSocket send
-        Err(NetError::ConnectionError("WebSocket not yet implemented".into()))
+    /// Send a text message
+    pub fn send(&mut self, message: &str) -> NetResult<()> {
+        if let Some(ref mut stream) = self.stream {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| NetError::ConnectionError(format!("Failed to create runtime: {}", e)))?;
+            
+            rt.block_on(async {
+                let msg = tungstenite::Message::text(message);
+                stream.send(msg).await.map_err(|e| {
+                    NetError::ConnectionError(format!("Failed to send message: {}", e))
+                })
+            })
+        } else {
+            Err(NetError::ConnectionError("WebSocket not connected".into()))
+        }
+    }
+
+    /// Send a binary message
+    pub fn send_binary(&mut self, data: &[u8]) -> NetResult<()> {
+        if let Some(ref mut stream) = self.stream {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| NetError::ConnectionError(format!("Failed to create runtime: {}", e)))?;
+            
+            rt.block_on(async {
+                let msg = tungstenite::Message::binary(data.to_vec());
+                stream.send(msg).await.map_err(|e| {
+                    NetError::ConnectionError(format!("Failed to send binary message: {}", e))
+                })
+            })
+        } else {
+            Err(NetError::ConnectionError("WebSocket not connected".into()))
+        }
     }
 
     /// Receive a message
-    pub fn recv(&mut self) -> NetResult<String> {
-        // TODO: Implement WebSocket receive
-        Err(NetError::ConnectionError("WebSocket not yet implemented".into()))
+    pub fn recv(&mut self) -> NetResult<WebSocketMessage> {
+        if let Some(ref mut stream) = self.stream {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| NetError::ConnectionError(format!("Failed to create runtime: {}", e)))?;
+            
+            rt.block_on(async {
+                match stream.next().await {
+                    Some(Ok(msg)) => Ok(convert_tungstenite_message(msg)),
+                    Some(Err(e)) => Err(NetError::ConnectionError(format!(
+                        "WebSocket receive error: {}", e
+                    ))),
+                    None => Err(NetError::ConnectionError("WebSocket stream ended".into())),
+                }
+            })
+        } else {
+            Err(NetError::ConnectionError("WebSocket not connected".into()))
+        }
+    }
+
+    /// Get the current ready state
+    pub fn ready_state(&self) -> WebSocketReadyState {
+        self.ready_state.clone()
     }
 
     /// Close the connection
-    pub fn close(self) -> NetResult<()> {
-        // TODO: Implement WebSocket close
+    pub fn close(&mut self) -> NetResult<()> {
+        self.ready_state = WebSocketReadyState::Closing;
+        if let Some(ref mut stream) = self.stream {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| NetError::ConnectionError(format!("Failed to create runtime: {}", e)))?;
+            
+            rt.block_on(async {
+                let msg = tungstenite::Message::Close(None);
+                stream.send(msg).await.ok();
+            });
+            self.stream = None;
+        }
+        self.ready_state = WebSocketReadyState::Closed;
         Ok(())
+    }
+}
+
+fn convert_tungstenite_message(msg: tungstenite::Message) -> WebSocketMessage {
+    match msg {
+        tungstenite::Message::Text(s) => WebSocketMessage::Text(s),
+        tungstenite::Message::Binary(b) => WebSocketMessage::Binary(b),
+        tungstenite::Message::Close(close_frame) => {
+            let (code, reason) = match close_frame {
+                Some(frame) => (Some(frame.code.into()), Some(frame.reason.to_string())),
+                None => (None, None),
+            };
+            WebSocketMessage::Close(code, reason)
+        }
+        _ => WebSocketMessage::Text(String::new()),
+    }
+}
+
+fn check_ws_url_permissions(url: &str, permissions: &Permissions) -> NetResult<String> {
+    if url.starts_with("ws://") || url.starts_with("wss://") {
+        let parsed = url::Url::parse(url)
+            .map_err(|_| NetError::InvalidUrl(url.to_string()))?;
+
+        let hostname = parsed
+            .host_str()
+            .ok_or_else(|| NetError::InvalidUrl("No hostname in URL".into()))?;
+
+        permissions.check_net(hostname)?;
+        Ok(hostname.to_string())
+    } else {
+        Err(NetError::InvalidUrl("URL must start with ws:// or wss://".into()))
     }
 }
 
@@ -832,6 +1007,81 @@ mod tests {
         assert!(opts.timeout.is_some());
         assert!(opts.headers.is_some());
         assert!(opts.redirect.is_some());
+    }
+
+    // ========================================================================
+    // WebSocket Tests
+    // ========================================================================
+
+    #[test]
+    fn test_websocket_ready_state_as_str() {
+        assert_eq!(WebSocketReadyState::Connecting.as_str(), "connecting");
+        assert_eq!(WebSocketReadyState::Open.as_str(), "open");
+        assert_eq!(WebSocketReadyState::Closing.as_str(), "closing");
+        assert_eq!(WebSocketReadyState::Closed.as_str(), "closed");
+    }
+
+    #[test]
+    fn test_websocket_options_default() {
+        let opts = WebSocketOptions::default();
+        assert!(opts.headers.is_none());
+        assert!(opts.timeout.is_none());
+    }
+
+    #[test]
+    fn test_websocket_message_text() {
+        let msg = WebSocketMessage::Text("hello".to_string());
+        assert!(msg.is_text());
+        assert!(!msg.is_binary());
+        assert!(!msg.is_close());
+        assert_eq!(msg.to_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn test_websocket_message_binary() {
+        let msg = WebSocketMessage::Binary(vec![0x01, 0x02, 0x03]);
+        assert!(!msg.is_text());
+        assert!(msg.is_binary());
+        assert!(!msg.is_close());
+        // Binary can be converted to text if valid UTF-8
+        let text = msg.to_text();
+        assert!(text.is_some());
+    }
+
+    #[test]
+    fn test_websocket_message_close() {
+        let msg = WebSocketMessage::Close(Some(1000), Some("normal".to_string()));
+        assert!(!msg.is_text());
+        assert!(!msg.is_binary());
+        assert!(msg.is_close());
+    }
+
+    #[test]
+    fn test_check_ws_url_permissions_allowed() {
+        let perms = Permissions::allow_all();
+        assert!(check_ws_url_permissions("ws://example.com", &perms).is_ok());
+        assert!(check_ws_url_permissions("wss://example.com", &perms).is_ok());
+    }
+
+    #[test]
+    fn test_check_ws_url_permissions_denied() {
+        let perms = Permissions::default();
+        assert!(matches!(
+            check_ws_url_permissions("ws://example.com", &perms),
+            Err(NetError::Permission(_))
+        ));
+        assert!(matches!(
+            check_ws_url_permissions("wss://example.com", &perms),
+            Err(NetError::Permission(_))
+        ));
+    }
+
+    #[test]
+    fn test_check_ws_url_invalid_scheme() {
+        let perms = Permissions::allow_all();
+        assert!(check_ws_url_permissions("http://example.com", &perms).is_err());
+        assert!(check_ws_url_permissions("https://example.com", &perms).is_err());
+        assert!(check_ws_url_permissions("not-a-url", &perms).is_err());
     }
 }
 

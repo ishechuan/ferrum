@@ -1617,6 +1617,11 @@ pub fn bootstrap_globals(
         let name = v8::String::new(scope2, "serve").unwrap();
         let func = v8::Function::new(scope2, op_serve).unwrap();
         deno.set(scope2, name.into(), func.into());
+
+        // connectWebSocket - for WebSocket client
+        let name = v8::String::new(scope2, "connectWebSocket").unwrap();
+        let func = v8::Function::new(scope2, op_connect_websocket).unwrap();
+        deno.set(scope2, name.into(), func.into());
     }
 
     // Set Deno on global object
@@ -1650,7 +1655,7 @@ pub fn clear_globals() {
 // HTTP Server Operations
 // ============================================================================
 
-use crate::ops::net::{serve, HttpServer, Request, Response, ServerOptions, ServerState};
+use crate::ops::net::{serve, HttpServer, Request, Response, ServerOptions, ServerState, WebSocketConnection, WebSocketMessage, WebSocketOptions, WebSocketReadyState};
 
 /// Deno.serve() implementation
 ///
@@ -2016,6 +2021,241 @@ pub fn op_server_listening(
         }
         rv.set_undefined();
     });
+}
+
+/// Deno.connectWebSocket() implementation
+///
+/// Connects to a WebSocket server and returns a WebSocket object.
+///
+/// # JavaScript Signature
+/// ```javascript
+/// async function Deno.connectWebSocket(url: string, options?: WebSocketOptions): Promise<WebSocket>
+/// ```
+///
+/// # Returns
+///
+/// A WebSocket object with properties:
+/// - url: string - The connection URL
+/// - readyState: number - Current state (0=connecting, 1=open, 2=closing, 3=closed)
+///
+/// And methods:
+/// - send(data: string | Uint8Array): void - Send a message
+/// - recv(): Promise<string | Uint8Array | null> - Receive a message
+/// - close(): void - Close the connection
+///
+/// # Example
+/// ```javascript
+/// const ws = await Deno.connectWebSocket("wss://echo.websocket.org");
+/// ws.send("Hello, World!");
+/// const msg = await ws.recv();
+/// console.log(msg);
+/// ws.close();
+/// ```
+pub fn op_connect_websocket(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let ctx = match unsafe { get_context(scope) } {
+        Some(ctx) => ctx,
+        None => {
+            throw_error(scope, "Runtime context not found");
+            return;
+        }
+    };
+
+    let url = match extract_string_arg(scope, &args, 0) {
+        Some(u) => u,
+        None => {
+            throw_type_error(scope, "connectWebSocket requires a string URL argument");
+            return;
+        }
+    };
+
+    let permissions = ctx.permissions.lock().unwrap();
+
+    match WebSocketConnection::connect(&url, None, &permissions) {
+        Ok(ws) => {
+            let ws_obj = v8::Object::new(scope);
+
+            let scope2 = &mut v8::HandleScope::new(scope);
+
+            let key_url = v8::String::new(scope2, "url").unwrap();
+            let url_val = v8::String::new(scope2, &url).unwrap();
+            ws_obj.set(scope2, key_url.into(), url_val.into());
+
+            let key_ready_state = v8::String::new(scope2, "readyState").unwrap();
+            let ready_state_val = v8::Number::new(scope2, 1.0);
+            ws_obj.set(scope2, key_ready_state.into(), ready_state_val.into());
+
+            let key_send = v8::String::new(scope2, "send").unwrap();
+            let func_send = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let ctx = match unsafe { get_context(scope3) } {
+                        Some(ctx) => ctx,
+                        None => {
+                            rv.set_undefined();
+                            return;
+                        }
+                    };
+
+                    let this = args.this();
+                    let url_key = v8::String::new(scope3, "url").unwrap();
+                    if let Some(url_val) = this.get(scope3, url_key.into()) {
+                        if let Ok(url_str) = v8::Local::<v8::String>::try_from(url_val) {
+                            let url = url_str.to_rust_string_lossy(scope3);
+                            let permissions = ctx.permissions.lock().unwrap();
+
+                            if args.length() > 0 {
+                                let arg = args.get(0);
+                                let mut ws = match WebSocketConnection::connect(&url, None, &permissions) {
+                                    Ok(w) => w,
+                                    Err(e) => {
+                                        throw_error(scope3, &format!("WebSocket connection failed: {}", e));
+                                        return;
+                                    }
+                                };
+
+                                if arg.is_string() {
+                                    let msg = arg.to_rust_string_lossy(scope3);
+                                    if let Err(e) = ws.send(&msg) {
+                                        throw_error(scope3, &format!("Send failed: {}", e));
+                                    } else {
+                                        rv.set_undefined();
+                                    }
+                                } else if let Some(bytes) = extract_bytes_arg(scope3, &args, 0) {
+                                    if let Err(e) = ws.send_binary(&bytes) {
+                                        throw_error(scope3, &format!("Send binary failed: {}", e));
+                                    } else {
+                                        rv.set_undefined();
+                                    }
+                                } else {
+                                    throw_type_error(scope3, "send() requires string or Uint8Array");
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    throw_error(scope3, "WebSocket not found");
+                },
+            )
+            .unwrap();
+            ws_obj.set(scope2, key_send.into(), func_send.into());
+
+            let key_recv = v8::String::new(scope2, "recv").unwrap();
+            let func_recv = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 _args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let ctx = match unsafe { get_context(scope3) } {
+                        Some(ctx) => ctx,
+                        None => {
+                            rv.set_undefined();
+                            return;
+                        }
+                    };
+
+                    let this = _args.this();
+                    let url_key = v8::String::new(scope3, "url").unwrap();
+                    if let Some(url_val) = this.get(scope3, url_key.into()) {
+                        if let Ok(url_str) = v8::Local::<v8::String>::try_from(url_val) {
+                            let url = url_str.to_rust_string_lossy(scope3);
+                            let permissions = ctx.permissions.lock().unwrap();
+                            let mut ws = match WebSocketConnection::connect(&url, None, &permissions) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    throw_error(scope3, &format!("WebSocket connection failed: {}", e));
+                                    return;
+                                }
+                            };
+
+                            match ws.recv() {
+                                Ok(msg) => {
+                                    match msg {
+                                        WebSocketMessage::Text(s) => {
+                                            let msg_str = v8::String::new(scope3, &s).unwrap();
+                                            rv.set(msg_str.into());
+                                        }
+                                        WebSocketMessage::Binary(b) => {
+                                            let buffer = v8::ArrayBuffer::new(scope3, b.len());
+                                            {
+                                                let backing_store = buffer.get_backing_store();
+                                                for (i, byte) in b.iter().enumerate() {
+                                                    backing_store[i].set(*byte);
+                                                }
+                                            }
+                                            let uint8_array =
+                                                v8::Uint8Array::new(scope3, buffer, 0, b.len()).unwrap();
+                                            rv.set(uint8_array.into());
+                                        }
+                                        _ => {
+                                            rv.set_null();
+                                        }
+                                    }
+                                    return;
+                                }
+                                Err(e) => {
+                                    throw_error(scope3, &format!("WebSocket receive failed: {}", e));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    throw_error(scope3, "WebSocket not found");
+                },
+            )
+            .unwrap();
+            ws_obj.set(scope2, key_recv.into(), func_recv.into());
+
+            let key_close = v8::String::new(scope2, "close").unwrap();
+            let func_close = v8::Function::new(
+                scope2,
+                |scope3: &mut v8::HandleScope,
+                 _args: v8::FunctionCallbackArguments,
+                 mut rv: v8::ReturnValue| {
+                    let ctx = match unsafe { get_context(scope3) } {
+                        Some(ctx) => ctx,
+                        None => {
+                            rv.set_undefined();
+                            return;
+                        }
+                    };
+
+                    let this = _args.this();
+                    let url_key = v8::String::new(scope3, "url").unwrap();
+                    if let Some(url_val) = this.get(scope3, url_key.into()) {
+                        if let Ok(url_str) = v8::Local::<v8::String>::try_from(url_val) {
+                            let url = url_str.to_rust_string_lossy(scope3);
+                            let permissions = ctx.permissions.lock().unwrap();
+                            let mut ws = match WebSocketConnection::connect(&url, None, &permissions) {
+                                Ok(w) => w,
+                                Err(_) => {
+                                    rv.set_undefined();
+                                    return;
+                                }
+                            };
+
+                            let _ = ws.close();
+                            rv.set_undefined();
+                            return;
+                        }
+                    }
+                    rv.set_undefined();
+                },
+            )
+            .unwrap();
+            ws_obj.set(scope2, key_close.into(), func_close.into());
+
+            rv.set(ws_obj.into());
+        }
+        Err(e) => {
+            throw_error(scope, &format!("WebSocket connection failed: {}", e));
+        }
+    }
 }
 
 #[cfg(test)]

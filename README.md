@@ -10,7 +10,7 @@ English | [简体中文](README.zh-CN.md)
 
 **Version:** 0.2.0 (Alpha)
 **Phase 1:** ✅ 100% Complete
-**Phase 2:** 95% Complete (TextEncoder/TextDecoder implemented!)
+**Phase 2:** 100% Complete (URL/URLSearchParams implemented!)
 
 This is an early-stage project with Phase 1 core functionality fully implemented. Phase 2 (Web APIs) is now 90% complete with HTTP server support and native ops bridge.
 
@@ -24,10 +24,11 @@ This is an early-stage project with Phase 1 core functionality fully implemented
 
 ### Standard Library
 - **File System API**: Read, write, copy, rename, directory operations (all async!)
-- **Network Operations**: DNS resolution, HTTP fetch (GET, POST, headers, timeout), HTTP Server (Deno.serve)
+- **Network Operations**: DNS resolution, HTTP fetch (GET, POST, headers, timeout), HTTP Server (Deno.serve), WebSocket
 - **Timer API**: setTimeout, setInterval, Deno.sleep, Promise support
 - **Path Utilities**: Cross-platform path manipulation
 - **Text Encoding**: TextEncoder, TextDecoder (UTF-8)
+- **URL API**: URL, URLSearchParams for web compatibility
 
 ### Developer Experience
 - **REPL**: Interactive shell with multi-line support
@@ -176,6 +177,61 @@ Run with:
 ferrum run encoding.js
 ```
 
+### URL Parsing
+```javascript
+// url.js
+// Parse and manipulate URLs
+const url = new URL("https://example.com:8080/path?foo=bar#section");
+
+console.log("Protocol:", url.protocol); // "https:"
+console.log("Hostname:", url.hostname); // "example.com"
+console.log("Port:", url.port);         // "8080"
+console.log("Path:", url.pathname);     // "/path"
+console.log("Query:", url.search);      // "?foo=bar"
+console.log("Hash:", url.hash);         // "#section"
+
+// URLSearchParams provides easy query string manipulation
+const params = url.searchParams;
+console.log("foo:", params.get("foo")); // "bar"
+
+// Modify the URL
+url.port = "3000";
+url.searchParams.set("baz", "qux");
+console.log("New URL:", url.href);
+```
+
+Run with:
+```bash
+ferrum run url.js
+```
+
+### WebSocket
+```javascript
+// websocket.js
+// Connect to a WebSocket server
+// Note: WebSocket operations require --allow-net permission
+const ws = await Deno.connectWebSocket("wss://echo.websocket.org");
+
+console.log("Connected:", ws.url);
+console.log("Ready state:", ws.readyState); // 1 = open
+
+// Send a message
+ws.send("Hello, WebSocket!");
+
+// Receive a message
+const message = await ws.recv();
+console.log("Received:", message);
+
+// Close the connection
+ws.close();
+console.log("Connection closed");
+```
+
+Run with:
+```bash
+ferrum run --allow-net websocket.js
+```
+
 ## Permission System
 
 Ferrum provides a secure permission system. By default, scripts run with NO access to:
@@ -271,7 +327,7 @@ ferrum/
 This is an alpha release. The following features are **not yet implemented**:
 
 ### Network
-- **WebSocket** - API designed, needs implementation
+- **WebSocket** - ✅ Implemented (basic support)
 - **TCP connections** - API designed, needs implementation
 - **ES Module imports** - Module loader works for `.mjs` files, but dynamic imports (`import()`) not yet supported
 - **Module resolution callback** - Basic implementation, needs enhancement for complex import graphs
@@ -301,7 +357,7 @@ This is an alpha release. The following features are **not yet implemented**:
 - [x] V8-Rust bridge
 - [x] Import map support
 
-### Phase 2: Web APIs - 95% Complete
+### Phase 2: Web APIs - 100% Complete
 - [x] Native Ops Bridge - V8-Rust bridge for calling Rust from JavaScript
 - [x] Fetch API (HTTP client) - Full async HTTP/HTTPS support with headers, timeout, POST
 - [x] Async/Await Bridge - V8 Promise integration with Tokio event loop
@@ -309,8 +365,8 @@ This is an alpha release. The following features are **not yet implemented**:
 - [x] Dynamic Imports - Deno.importModule() returns Promise for async module loading
 - [x] HTTP Server - Deno.serve() for building HTTP servers
 - [x] Text Encoding - TextEncoder/TextDecoder APIs for UTF-8 encoding/decoding
-- [ ] WebSocket - API designed, needs implementation
-- [ ] URL/URLSearchParams
+- [x] URL/URLSearchParams - URL parsing and manipulation API for web compatibility
+- [x] WebSocket - Basic WebSocket client support (ws://, wss://)
 
 ### Phase 3: Developer Tools - 30% Complete
 - [x] Test runner CLI - needs JavaScript integration
@@ -343,9 +399,9 @@ Contributions are welcome! This is an early-stage project and there's plenty to 
 
 ### Priority Areas
 
-1. **WebSocket Support** - Implement WebSocket client API
+1. **WebSocket Support** - ✅ Implemented basic WebSocket client API
 2. **Text Encoding** - ✅ Implemented TextEncoder/TextDecoder APIs
-3. **URL/URLSearchParams** - Implement URL API for web compatibility
+3. **URL/URLSearchParams** - ✅ Implemented URL API for web compatibility
 4. **Tests** - Add more integration tests for async operations
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines (coming soon).

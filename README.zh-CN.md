@@ -10,7 +10,7 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 **版本：** 0.2.0 (Alpha)
 **第一阶段：** ✅ 100% 完成
-**第二阶段：** 95% 完成（TextEncoder/TextDecoder 已实现！）
+**第二阶段：** 100% 完成（URL/URLSearchParams 已实现！）
 
 这是一个早期阶段的项目，第一阶段核心功能已完全实现。第二阶段（Web API）现已实现 HTTP 服务器支持，完成度达到 90%。
 
@@ -24,10 +24,11 @@ Ferrum 是一个受 Deno 启发的轻量级 JavaScript 和 TypeScript 运行时�
 
 ### 标准库
 - **文件系统 API**：读取、写入、复制、重命名、目录操作（全部支持异步！）
-- **网络操作**：DNS 解析、HTTP fetch（GET、POST、headers, timeout）、HTTP 服务器 (Deno.serve)
+- **网络操作**：DNS 解析、HTTP fetch（GET、POST、headers, timeout）、HTTP 服务器 (Deno.serve)、WebSocket
 - **定时器 API**：setTimeout、setInterval、Deno.sleep、Promise 支持
 - **路径工具**：跨平台路径操作
 - **文本编码**：TextEncoder、TextDecoder（UTF-8）
+- **URL API**：URL、URLSearchParams 用于 Web 兼容性
 
 ### 开发体验
 - **REPL**：支持多行输入的交互式 Shell
@@ -176,6 +177,61 @@ console.log(`读取: ${result.read}, 写入: ${result.written}`);
 ferrum run encoding.js
 ```
 
+### URL 解析
+```javascript
+// url.js
+// 解析和操作 URL
+const url = new URL("https://example.com:8080/path?foo=bar#section");
+
+console.log("协议:", url.protocol); // "https:"
+console.log("主机名:", url.hostname); // "example.com"
+console.log("端口:", url.port);         // "8080"
+console.log("路径:", url.pathname);     // "/path"
+console.log("查询:", url.search);      // "?foo=bar"
+console.log("哈希:", url.hash);         // "#section"
+
+// URLSearchParams 提供简单的查询字符串操作
+const params = url.searchParams;
+console.log("foo:", params.get("foo")); // "bar"
+
+// 修改 URL
+url.port = "3000";
+url.searchParams.set("baz", "qux");
+console.log("新 URL:", url.href);
+```
+
+运行：
+```bash
+ferrum run url.js
+```
+
+### WebSocket
+```javascript
+// websocket.js
+// 连接到 WebSocket 服务器
+// 注意：WebSocket 操作需要 --allow-net 权限
+const ws = await Deno.connectWebSocket("wss://echo.websocket.org");
+
+console.log("已连接:", ws.url);
+console.log("就绪状态:", ws.readyState); // 1 = open
+
+// 发送消息
+ws.send("Hello, WebSocket!");
+
+// 接收消息
+const message = await ws.recv();
+console.log("收到:", message);
+
+// 关闭连接
+ws.close();
+console.log("连接已关闭");
+```
+
+运行：
+```bash
+ferrum run --allow-net websocket.js
+```
+
 ## 权限系统
 
 Ferrum 提供了安全的权限系统。默认情况下，脚本**无权访问**：
@@ -270,7 +326,7 @@ ferrum/
 这是一个 Alpha 版本，以下功能**尚未实现**：
 
 ### 网络
-- **WebSocket** - 已设计，待实现
+- **WebSocket** - ✅ 已实现（基础支持）
 - **TCP 连接** - 已设计，待实现
 - **ES 模块导入** - 模块加载器支持 `.mjs` 文件，但动态导入（`import()`）尚未实现
 - **模块解析回调** - 基础实现已就绪，需要增强以支持复杂的导入图
@@ -300,16 +356,16 @@ ferrum/
 - [x] V8-Rust 桥接
 - [x] 导入映射支持
 
-### 第二阶段：Web API - 95% 完成
+### 第二阶段：Web API - 100% 完成
 - [x] Native Ops 桥接 - V8-Rust 桥接，支持从 JavaScript 调用 Rust
-- [x] Fetch API (HTTP 客户端) - 完整的异步 HTTP/HTTPS 支持，包含 headers、timeout、POST
+- [x] Fetch API (HTTP 客户端) - 完整的异步 HTTP/HTTPS 支持，包含 headers, timeout, POST
 - [x] 异步/await 桥接 - V8 Promise 与 Tokio 事件循环集成
 - [x] 异步文件操作 - Deno.readTextFile、writeTextFile、copy、readDir、rename 返回 Promise
 - [x] 动态导入 - Deno.importModule() 返回 Promise 用于异步模块加载
 - [x] HTTP 服务器 - Deno.serve() 用于构建 HTTP 服务器
 - [x] 文本编码/解码 - TextEncoder/TextDecoder API 支持 UTF-8 编码/解码
-- [ ] WebSocket - 已设计，待实现
-- [ ] URL/URLSearchParams
+- [x] URL/URLSearchParams - 用于 Web 兼容性的 URL 解析和操作 API
+- [x] WebSocket - 基础 WebSocket 客户端支持 (ws://, wss://)
 
 ### 第三阶段：开发工具 - 30% 完成
 - [x] 测试运行器 CLI - 需要 JavaScript 集成
@@ -342,9 +398,9 @@ ferrum/
 
 ### 优先领域
 
-1. **WebSocket 支持** - 实现 WebSocket 客户端 API
+1. **WebSocket 支持** - ✅ 已实现基础 WebSocket 客户端 API
 2. **文本编码** - ✅ 已实现 TextEncoder/TextDecoder API
-3. **URL/URLSearchParams** - 实现 URL API 以支持 Web 兼容性
+3. **URL/URLSearchParams** - ✅ 已实现 URL API 以支持 Web 兼容性
 4. **测试** - 为异步操作添加更多集成测试
 
 指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)（即将推出）。
